@@ -1,0 +1,8 @@
+streamlit>=1.45
+pandas>=2.1
+numpy>=1.26
+openpyxl>=3.1
+jinja2>=3.1
+
+# Chỉ cần khi chạy tests/verify_xlsx.py, tests/verify_savic.py (tính lại công thức Excel)
+# formulas

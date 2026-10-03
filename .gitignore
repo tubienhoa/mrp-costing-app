@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Môi trường ảo
+venv/
+.venv/
+env/
+ENV/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Kết quả sinh ra khi chạy test / xuất file
+tests/master.xlsx
+tests/ui_wrapper.py
+tests/pylib/
+tests/sample_*.xlsx
+
+# File tạm, backup, scratchpad
+scratchpad/
+*_backup.py
+*.bak
+*.tmp
+~$*
+.~lock.*
+
+# Dữ liệu thật của khách hàng (không đưa lên git)
+*.csv
+
+# IDE / hệ điều hành
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code (cấu hình cục bộ)
+.claude/settings.local.json
