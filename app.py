@@ -726,6 +726,8 @@ def std_material_name(desc, material, t, w, l, w2=None):
 
 TYPE_LABEL = {"FG": "Thành phẩm (FG)", "SG": "Bán thành phẩm (SG)", "BTP": "BTP công đoạn (WIP)", "RM": "Nguyên vật liệu (RM)"}
 TYPE_RANK = {"RM": 0, "SG": 1, "BTP": 1, "FG": 2}
+# ĐVT đếm được / theo chiều dài của vật tư mua ngoài (đã norm)
+COTS_UOMS = {"cai", "bo", "pcs", "pc", "set", "m", "met", "chiec", "con", "cap", "doi", "bich", "cuon", "lit", "chai"}
 
 
 def _val(rec, k, default=None):
@@ -921,7 +923,9 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
         stages = row_stages(r)
         is_leaf = not children[i]
         code_is_rm = bool(code) and bool(prefix) and ncode(code).startswith(prefix)
-        rm_leaf = is_leaf and (code_is_rm or (not stages and (not code or not fabricated)))
+        # Vật tư mua ngoài (COTS): ĐVT đếm được, không KL, không hình dạng phôi, không công đoạn → RM thẳng, không sinh BTP
+        cots = (kg <= 0 and not std and not stages and norm(_val(r, "ĐVT", "")) in COTS_UOMS)
+        rm_leaf = is_leaf and (code_is_rm or cots or (not stages and (not code or not fabricated)))
         if rm_leaf:
             if not code and not desc and not rm_col:
                 return
@@ -1892,7 +1896,7 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
             "tax": st.number_input("% Thuế TNDN", min_value=0.0, max_value=100.0, value=20.0, step=1.0),
             "default_scrap": st.number_input("% Hao hụt mặc định (khi BOM trống)", min_value=0.0, value=0.0, step=0.5),
             "kg_price": max(0.0, money_input("Đơn giá NVL mặc định (VND/Kg)", "in_kg", 22000)),
-            "unit_price": max(0.0, money_input("Đơn giá vật tư mặc định (VND/ĐVT khác)", "in_unit", 0)),
+            "unit_price": max(0.0, money_input("Đơn giá mặc định vật tư (ĐVT Cái/Khác, VND)", "in_unit", 5000)),
             "rm_prefix": st.text_input("Tiền tố mã NVL thô trong BOM", "R-"),
             "pallet_qty": st.number_input("SL thành phẩm / Pallet", min_value=1, value=50, step=1),
         }

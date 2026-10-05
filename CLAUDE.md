@@ -126,7 +126,7 @@ Các quy tắc khác:
   - Thiếu kích thước thì thử đọc từ mô tả (`phi 20`, `t=8`, `40x40x2`).
 - Mã RM khi BOM không có Mã NVL: lấy mã PO nếu tên PO trùng tên chuẩn; ngược lại sinh `RM-` + slug (ví dụ `RM-THEP-TAM-8.0`, `RM-THEP-HOP-80X80X3`).
 - ĐVT: KL nguyên liệu > 0 → `Kg`; ngược lại lấy ĐVT của dòng hoặc `Cái`.
-- **Giá mặc định ở Sidebar: 22,000 VND/kg** (ĐVT Kg), **0 VND** cho ĐVT khác. Tỷ giá 25,400 (ô B6). SG&A 5%, thuế TNDN 20%, lead time 21 ngày, 50 SP/pallet, tiền tố NVL `R-`.
+- **Giá mặc định ở Sidebar: 22,000 VND/kg** (ĐVT Kg), **5,000 VND** cho ĐVT khác (Cái/Bộ…; `unit_price`). Tỷ giá 25,400 (ô B6). SG&A 5%, thuế TNDN 20%, lead time 21 ngày, 50 SP/pallet, tiền tố NVL `R-`.
 - Đơn giá công đoạn mặc định (`DEFAULT_STAGE_RATES`, VND/SP, chỉ là số gợi ý): cắt 12k/6k, chấn 8k/4k, khoan 6k/3k, hàn 25k/12k, mài 6k/3k, sơn 18k/15k, mạ 15k/12k, lắp 15k/6k, đóng gói 8k/3k; còn lại 10k/5k (nhân công / SXC).
 - ⚠️ Savic hiện **chưa có giá thật** (BOM không có cột đơn giá, chưa có PO) → cả 6 RM đang dùng giá 22,000/kg.
 
