@@ -24,9 +24,9 @@ Nguyên tắc Vận hành Độc lập (Operating Policy):
 
 •	Khởi động ứng dụng: Khi chưa có file tải lên, ứng dụng hiển thị trạng thái chờ và thông báo yêu cầu nạp tối thiểu 2 tệp bắt buộc (SO + Technical BOM).
 
-•	Kịch bản 2 Tệp (SO + Technical BOM): Hệ thống lập tức kích hoạt bộ máy rã BOM đa cấp, tự động bóc tách danh mục Nguyên vật liệu thô (NVL), tính toán Nhu cầu MRP. Do không có PO, đơn giá vật tư mặc định bằng 0 (nguồn giá hiển thị "Chưa nạp PO (0đ)") và TK 621 = 0; người dùng có thể nhập giá bổ sung qua Live BOM Editor.
+•	Kịch bản 2 Tệp (SO + Technical BOM): Hệ thống lập tức kích hoạt bộ máy rã BOM đa cấp, tự động bóc tách danh mục Nguyên vật liệu thô (NVL), tính toán Nhu cầu MRP. Không có PO -> Đơn giá NVL mặc định = 0đ (nguồn giá hiển thị "Chưa nạp PO (0đ)"), TK 621 = 0đ, trừ khi người dùng chủ động gõ giá tại Live BOM Editor (nguồn giá "BOM / Live Editor").
 
-•	Kịch bản 3 Tệp (SO + Technical BOM + PO): Hệ thống dùng danh mục vật tư rã từ Technical BOM làm gốc, đối chiếu sang file PO theo Mã vật tư ERP hoặc Tên vật tư chuẩn. Dòng khớp: lấy Đơn giá mua thực tế và Mã PO thực tế (nguồn giá "PO: <Số PO>"). Dòng không khớp PO: dùng giá người dùng đã nhập ở BOM / Live BOM Editor (nguồn giá "BOM / Live Editor"); nếu cũng không có thì đơn giá = 0 (nguồn giá "Chưa có giá PO (0đ)").
+•	Kịch bản 3 Tệp (SO + Technical BOM + PO): Hệ thống dùng danh mục vật tư rã từ Technical BOM làm gốc, đối chiếu sang file PO theo Mã vật tư ERP hoặc Tên vật tư chuẩn. Có PO -> Dòng khớp lấy giá PO (nguồn giá "PO: <Số PO>"); dòng không khớp gán đơn giá = 0đ (nguồn giá "Chưa có giá PO (0đ)"), trừ khi người dùng đã gõ giá tại BOM / Live BOM Editor thì dùng giá đó (nguồn giá "BOM / Live Editor").
 
 2\. CẤU TRÚC BOM KỸ THUẬT \& THUẬT TOÁN CHUYỂN ĐỔI SANG BOM ERP
 
@@ -106,7 +106,7 @@ Q\_MRP(RM\_k) = SUM\_{FG\_i in SO} \[ Q\_SO(FG\_i) \* R\_cum(RM\_k, FG\_i) ]
 
 Bộ máy tài chính thực hiện hạch toán chi tiết chi phí sản xuất theo 3 tài khoản kế toán chi phí (TK 621, TK 622, TK 627) và tính toán P\&L theo thời gian thực:
 
-Chi Phí NVL Trực Tiếp (TK 621): TK 621 = SUM \[ Q\_MRP(RM\_k) \* UnitPrice(RM\_k) ], trong đó UnitPrice theo thứ tự ưu tiên: (1) Đơn giá PO nếu RM_k khớp PO; (2) Đơn giá nhập tại BOM / Live BOM Editor nếu có; (3) ngược lại = 0; (4) giá tạm Sidebar chỉ khi người dùng chủ động bật. Hệ thống không tự động dùng giá mặc định; giá tham khảo ở Sidebar chỉ được áp khi người dùng chủ động bật "Áp giá tạm từ Sidebar".
+Chi Phí NVL Trực Tiếp (TK 621): TK 621 = SUM \[ Q\_MRP(RM\_k) \* UnitPrice(RM\_k) ], trong đó UnitPrice theo thứ tự ưu tiên: PO thực tế (nếu RM_k khớp PO) > BOM / Live Editor (giá người dùng nhập) > 0đ. Giá tham khảo ở Sidebar không tự động áp; chỉ áp cho dòng còn 0đ khi người dùng tích chọn checkbox "Áp giá tạm từ Sidebar".
 
 Chi Phí Nhân Công (TK 622): TK 622 = SUM\_{Stage} \[ Total SO Qty \* Labor Rate\_{Stage} ]
 
