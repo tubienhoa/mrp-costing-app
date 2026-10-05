@@ -28,3 +28,19 @@ open(os.path.join(D, "master.xlsx"), "wb").write(x)
 names, stats = app.count_formulas(x)
 print(len(names), names)
 print(stats.to_string())
+
+# ---- Kiểm tra quy tắc định giá: chỉ lấy giá từ PO, còn lại = 0 ----
+m = res["mrp_df"]
+if use_po:
+    for _, r in m.iterrows():
+        if r["Nguồn giá"].startswith("PO:"):
+            assert r["Đơn giá (VND)"] > 0, r["Mã NVL"]
+        else:
+            assert r["Nguồn giá"] == "Chưa có giá PO (0đ)" and r["Đơn giá (VND)"] == 0, (r["Mã NVL"], r["Nguồn giá"])
+    print("PRICING OK (có PO):", m["Nguồn giá"].value_counts().to_dict())
+else:
+    own = m["Nguồn giá"] == "BOM / Live Editor"   # giá do người dùng nhập tại BOM/Editor (mẫu: R-B-M10)
+    assert (m.loc[~own, "Đơn giá (VND)"] == 0).all() and (m.loc[~own, "Nguồn giá"] == "Chưa nạp PO (0đ)").all()
+    assert (m.loc[own, "Đơn giá (VND)"] > 0).all()
+    assert abs(fin["tk621"] - m.loc[own, "Thành tiền (VND)"].sum()) < 1e-6
+    print("PRICING OK (không PO): đơn giá = 0 trừ dòng nhập tay;", int(own.sum()), "dòng có giá BOM; TK 621 =", fin["tk621"])

@@ -1025,15 +1025,23 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
     for i, c in enumerate(rm_used):
         n = nodes[c]
         po = po_map.get(ncode(c)) or po_by_name.get(norm(n["name"])) or (po_by_name.get(norm(n["std"])) if n["std"] else None)
-        if po and po["price"] > 0:
-            price, src = po["price"], "PO thực tế"
+        # Quy tắc giá: có PO → chỉ lấy giá PO khớp, không khớp = 0. Không có PO → giá nhập tại BOM/Live Editor, còn lại = 0.
+        # Giá Sidebar chỉ được áp khi người dùng chủ động bật "Áp giá tạm từ Sidebar".
+        if po_df is not None:
+            if po and po["price"] > 0:
+                price, src = po["price"], f"PO: {po['po'] or 'không số'}"
+            else:
+                price, src = 0.0, "Chưa có giá PO (0đ)"
         elif n["price_bom"] > 0:
             price, src = n["price_bom"], "BOM / Live Editor"
         else:
+            price, src = 0.0, "Chưa nạp PO (0đ)"
+        if price <= 0 and P.get("apply_sidebar"):
             price = P["kg_price"] if n["uom"] == "Kg" else P["unit_price"]
-            src = "Sidebar (mặc định)"
-            if price <= 0:
-                W.append(f"NVL {c} ({n['name']}, ĐVT {n['uom']}) chưa có đơn giá – nhập tại Live BOM Editor hoặc Sidebar.")
+            if price > 0:
+                src = "Giá tạm Sidebar"
+        if price <= 0:
+            W.append(f"NVL {c} ({n['name']}, ĐVT {n['uom']}) có đơn giá 0đ – {src}.")
         q = sum(l["Số Lượng"] * R[i][j] for j, l in enumerate(so_lines))
         rm_rows.append({"Mã NVL": c, "Tên NVL": n["name"], "ĐVT": n["uom"], "Nhu cầu MRP": q, "Đơn giá (VND)": price,
                         "Thành tiền (VND)": q * price, "Nguồn giá": src,
@@ -1895,8 +1903,10 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
             "sga": st.number_input("% Chi phí QL & BH (SG&A)", min_value=0.0, max_value=100.0, value=5.0, step=0.5),
             "tax": st.number_input("% Thuế TNDN", min_value=0.0, max_value=100.0, value=20.0, step=1.0),
             "default_scrap": st.number_input("% Hao hụt mặc định (khi BOM trống)", min_value=0.0, value=0.0, step=0.5),
-            "kg_price": max(0.0, money_input("Đơn giá NVL mặc định (VND/Kg)", "in_kg", 22000)),
-            "unit_price": max(0.0, money_input("Đơn giá mặc định vật tư (ĐVT Cái/Khác, VND)", "in_unit", 5000)),
+            "kg_price": max(0.0, money_input("Giá tham khảo NVL (VND/Kg)", "in_kg", 22000)),
+            "unit_price": max(0.0, money_input("Giá tham khảo vật tư (ĐVT Cái/Khác, VND)", "in_unit", 5000)),
+            "apply_sidebar": st.checkbox("Áp giá tạm từ Sidebar cho NVL chưa có giá", value=False,
+                                         help="Mặc định tắt: NVL không có giá PO thì đơn giá = 0đ. Bật để dùng 2 ô giá tham khảo ở trên."),
             "rm_prefix": st.text_input("Tiền tố mã NVL thô trong BOM", "R-"),
             "pallet_qty": st.number_input("SL thành phẩm / Pallet", min_value=1, value=50, step=1),
         }
@@ -2063,7 +2073,7 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
                 st.json(so_info["mapping"])
         with t2:
             if po_df is None:
-                st.info("Chưa nạp file PO – kịch bản 2 tệp. Đơn giá lấy từ BOM / Live Editor / Sidebar.")
+                st.info("Chưa nạp file PO – kịch bản 2 tệp. Đơn giá NVL = 0đ, trừ khi nhập giá tại Live BOM Editor.")
             else:
                 st.caption(f"Sheet `{po_info['sheet']}` • tiêu đề tại dòng {po_info['header_row']}")
                 po_v = po_df.rename(columns={"Số PO Mua": "Số PO"})
@@ -2073,7 +2083,7 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
                                "Thành tiền dự kiến (VND)": "{:,.0f}"}, total=True, height=340)
                 with st.expander("Ánh xạ cột (Smart Header Parser)"):
                     st.json(po_info["mapping"])
-                matched = int((mrp["Nguồn giá"] == "PO thực tế").sum()) if len(mrp) else 0
+                matched = int(mrp["Nguồn giá"].str.startswith("PO:").sum()) if len(mrp) else 0
                 st.metric("NVL khớp đơn giá PO", f"{matched} / {len(mrp)}")
 
     # ---------------- BOM ERP ----------------
@@ -2136,6 +2146,9 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
         t1, t2, t3, t4, t5 = st.tabs(["🏷️ Giá thành SKU", "TK 621 – NVL", "TK 622 – Nhân công", "TK 627 – SXC",
                                       "📈 Báo cáo P&L"])
         money = NUMCFG(format="localized")
+        if len(mrp) and fin["tk621"] <= 0:
+            st.warning("Dự án đang tính toán với Đơn giá NVL = 0đ do chưa nạp file PO hoặc chưa nhập giá trong Live BOM Editor. "
+                       "Vui lòng nạp PO để hạch toán đầy đủ TK 621 và Giá vốn COGS.")
         with t1:
             sku_t = with_total(fin["sku"], "Tên TP", ["Số lượng", "Tổng giá thành"])
             show_df(sku_t, {k: "{:,.0f}" for k in ["Số lượng", "CP NVL/SP", "CP NC/SP", "CP SXC/SP", "Giá thành/SP",

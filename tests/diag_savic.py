@@ -22,3 +22,14 @@ if "-e" in sys.argv:
     rates = [{"stage": s, "labor": 10000, "oh": 5000} for s in res["used_stages"]]
     fin = app.compute_financials(res, so_df, rates, P)
     print(fin["sku"].to_string()); print(fin["pl"].to_string())
+
+# ---- Quy tắc giá mới: không có PO → đơn giá 0, TK 621 = 0 ----
+m = res["mrp_df"]
+assert (m["Đơn giá (VND)"] == 0).all() and (m["Nguồn giá"] == "Chưa nạp PO (0đ)").all()
+fin0 = app.compute_financials(res, so_df, [{"stage": s, "labor": 10000, "oh": 5000} for s in res["used_stages"]], P)
+assert fin0["tk621"] == 0, fin0["tk621"]
+assert abs(m["Nhu cầu MRP"].sum() - 30896.59) < 0.01
+# Áp giá tạm Sidebar (chủ động) → tái lập mốc cũ 679,725,036
+res2 = app.run_engine(bom_df, sc, ctx, so_df, None, dict(P, apply_sidebar=True))
+assert round(res2["mrp_df"]["Thành tiền (VND)"].sum()) == 679725036
+print("PRICING OK: không PO TK621 = 0; áp giá tạm Sidebar TK621 = 679,725,036")
