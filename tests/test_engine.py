@@ -33,7 +33,7 @@ print(stats.to_string())
 m = res["mrp_df"]
 if use_po:
     for _, r in m.iterrows():
-        if r["Nguồn giá"].startswith("PO:"):
+        if r["Nguồn giá"].startswith("PO:") or r["Nguồn giá"] == "BOM / Live Editor":
             assert r["Đơn giá (VND)"] > 0, r["Mã NVL"]
         else:
             assert r["Nguồn giá"] == "Chưa có giá PO (0đ)" and r["Đơn giá (VND)"] == 0, (r["Mã NVL"], r["Nguồn giá"])

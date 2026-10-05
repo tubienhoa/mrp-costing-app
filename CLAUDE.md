@@ -8,8 +8,8 @@
 - Ứng dụng **Streamlit một file** (`app.py`) cho công ty cơ khí xuất khẩu **Metalic**.
 - Chức năng: rã Technical BOM đa cấp → BOM ERP (FG / SG / BTP / RM) → MRP → hạch toán TK 621/622/627 → P&L → xuất **Excel Master 25 sheet, 100% công thức sống**.
 - Đầu vào: **SO** (bắt buộc), **Technical BOM** (bắt buộc), **PO** (tùy chọn); định dạng `.xlsx/.xlsm/.csv`.
-  - Kịch bản 2 tệp: **không có PO → đơn giá NVL = 0** (nguồn giá `Chưa nạp PO (0đ)`), TK 621 = 0; chỉ giá người dùng gõ ở BOM / Live BOM Editor mới được dùng.
-  - Kịch bản 3 tệp: danh mục NVL lấy từ BOM làm gốc, đối chiếu sang PO để lấy đơn giá, số PO và NCC (khớp → `PO: <số PO>`; không khớp → 0, `Chưa có giá PO (0đ)`).
+  - Kịch bản 2 tệp: **không có PO → đơn giá NVL = 0** (nguồn giá `Chưa nạp PO (0đ)`), TK 621 = 0; chỉ giá người dùng gõ ở BOM / Live BOM Editor mới được dùng (xem thứ tự ưu tiên 4 bước ở mục 2).
+  - Kịch bản 3 tệp: danh mục NVL lấy từ BOM làm gốc, đối chiếu sang PO để lấy đơn giá, số PO và NCC (khớp → `PO: <số PO>`; không khớp → giá BOM / Live Editor nếu có, ngược lại 0, `Chưa có giá PO (0đ)`).
 - Chưa nạp đủ SO + BOM → màn hình chờ (`clean_slate()`), gọi `st.stop()`.
 - Môi trường: Windows 11, Python 3.14, Streamlit 1.63, pandas 3.0, openpyxl 3.1. Chạy app: `streamlit run app.py`.
 - Dự án **chưa dùng git**.
@@ -60,10 +60,11 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
 - **Hao hụt** áp lên cạnh tiêu hao RM (nếu dòng có RM), ngược lại áp lên cạnh cha→dòng. Hiệu lực: `eff = rate × (1 + scrap/100)`.
 - **DAG:** một mã xuất hiện nhiều lần chỉ được rã cấu trúc con ở lần đầu (`expanded[code] = occurrence`), nên không bị nhân đôi nhu cầu. Có phát hiện vòng lặp.
 - **R_cum:** `cum(node)` đệ quy có memo, cộng qua mọi đường đi. `Q_MRP = Σ Q_SO × R_cum`.
-- **Đơn giá** (3 kịch bản, không còn fallback tự động về Sidebar):
-  1. Có PO (`po_df is not None`): khớp PO (mã, rồi tên chuẩn / tên) → giá PO, nguồn `PO: <Số PO>`; không khớp → **0**, nguồn `Chưa có giá PO (0đ)` (giá trong BOM/Editor bị bỏ qua).
-  2. Không PO: có `Đơn giá` nhập ở BOM / Live Editor → dùng, nguồn `BOM / Live Editor`; ngược lại **0**, nguồn `Chưa nạp PO (0đ)`.
-  3. Chỉ khi người dùng bật checkbox Sidebar "Áp giá tạm từ Sidebar" (`P["apply_sidebar"]`): dòng giá 0 dùng `kg_price` (Kg) / `unit_price` (ĐVT khác), nguồn `Giá tạm Sidebar`.
+- **Đơn giá** (thứ tự ưu tiên 4 bước, không có fallback tự động về Sidebar):
+  1. Có PO và dòng khớp PO (mã, rồi tên chuẩn / tên; giá PO > 0) → giá PO, nguồn `PO: <Số PO>`.
+  2. Không khớp PO (hoặc không có PO) mà `n["price_bom"] > 0` (giá nhập ở BOM / Live BOM Editor) → dùng giá đó, nguồn `BOM / Live Editor`.
+  3. Cả hai đều không có → **0**; nguồn `Chưa có giá PO (0đ)` (có PO nhưng không khớp) hoặc `Chưa nạp PO (0đ)` (không có PO).
+  4. Giá vẫn ≤ 0 và người dùng bật checkbox Sidebar "Áp giá tạm từ Sidebar" (`P["apply_sidebar"]`) → `kg_price` (Kg) / `unit_price` (ĐVT khác), nguồn `Giá tạm Sidebar`.
   Giá 0 → có cảnh báo; tab Giá thành & P&L hiện `st.warning` khi TK 621 = 0.
 - **TK 622 / 627** = Tổng SL SO × Σ đơn giá các công đoạn **có xuất hiện trong BOM** (đúng công thức đặc tả).
 - **NPAT** = `MAX(0, EBIT × (1 − %thuế))` – theo đúng đặc tả. Lỗ thì hiện 0 và có cảnh báo.
@@ -130,7 +131,7 @@ Các quy tắc khác:
   - Thiếu kích thước thì thử đọc từ mô tả (`phi 20`, `t=8`, `40x40x2`).
 - Mã RM khi BOM không có Mã NVL: lấy mã PO nếu tên PO trùng tên chuẩn; ngược lại sinh `RM-` + slug (ví dụ `RM-THEP-TAM-8.0`, `RM-THEP-HOP-80X80X3`).
 - ĐVT: KL nguyên liệu > 0 → `Kg`; ngược lại lấy ĐVT của dòng hoặc `Cái`.
-- **Giá tham khảo ở Sidebar: 22,000 VND/kg** (ĐVT Kg), **5,000 VND** cho ĐVT khác (Cái/Bộ…; `unit_price`) – **chỉ dùng khi bật "Áp giá tạm từ Sidebar"**; mặc định khi không có PO, giá NVL = 0 và TK 621 = 0 (có cảnh báo trên UI). Tỷ giá 25,400 (ô B6). SG&A 5%, thuế TNDN 20%, lead time 21 ngày, 50 SP/pallet, tiền tố NVL `R-`.
+- **Giá tham khảo ở Sidebar: 22,000 VND/kg** (ĐVT Kg), **5,000 VND** cho ĐVT khác (Cái/Bộ…; `unit_price`) – **chỉ dùng khi bật "Áp giá tạm từ Sidebar"**; mặc định khi không có PO và không có giá Editor, giá NVL = 0 và TK 621 = 0 (có cảnh báo trên UI). Tỷ giá 25,400 (ô B6). SG&A 5%, thuế TNDN 20%, lead time 21 ngày, 50 SP/pallet, tiền tố NVL `R-`.
 - Đơn giá công đoạn mặc định (`DEFAULT_STAGE_RATES`, VND/SP, chỉ là số gợi ý): cắt 12k/6k, chấn 8k/4k, khoan 6k/3k, hàn 25k/12k, mài 6k/3k, sơn 18k/15k, mạ 15k/12k, lắp 15k/6k, đóng gói 8k/3k; còn lại 10k/5k (nhân công / SXC).
 - ⚠️ Savic hiện **chưa có giá thật** (BOM không có cột đơn giá, chưa có PO) → cả 6 RM có giá 0 và TK 621 = 0 cho đến khi nạp PO.
 

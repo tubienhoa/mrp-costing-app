@@ -1025,17 +1025,13 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
     for i, c in enumerate(rm_used):
         n = nodes[c]
         po = po_map.get(ncode(c)) or po_by_name.get(norm(n["name"])) or (po_by_name.get(norm(n["std"])) if n["std"] else None)
-        # Quy tắc giá: có PO → chỉ lấy giá PO khớp, không khớp = 0. Không có PO → giá nhập tại BOM/Live Editor, còn lại = 0.
-        # Giá Sidebar chỉ được áp khi người dùng chủ động bật "Áp giá tạm từ Sidebar".
-        if po_df is not None:
-            if po and po["price"] > 0:
-                price, src = po["price"], f"PO: {po['po'] or 'không số'}"
-            else:
-                price, src = 0.0, "Chưa có giá PO (0đ)"
+        # Thứ tự giá: (1) PO khớp > (2) BOM / Live Editor > (3) 0đ > (4) giá tạm Sidebar (chỉ khi người dùng bật).
+        if po and po["price"] > 0:
+            price, src = po["price"], f"PO: {po['po'] or 'không số'}"
         elif n["price_bom"] > 0:
             price, src = n["price_bom"], "BOM / Live Editor"
         else:
-            price, src = 0.0, "Chưa nạp PO (0đ)"
+            price, src = 0.0, ("Chưa có giá PO (0đ)" if po_df is not None else "Chưa nạp PO (0đ)")
         if price <= 0 and P.get("apply_sidebar"):
             price = P["kg_price"] if n["uom"] == "Kg" else P["unit_price"]
             if price > 0:
