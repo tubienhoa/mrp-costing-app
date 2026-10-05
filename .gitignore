@@ -17,6 +17,7 @@ ENV/
 
 # Kết quả sinh ra khi chạy test / xuất file
 tests/master.xlsx
+tests/master_*.xlsx
 tests/ui_wrapper.py
 tests/pylib/
 tests/sample_*.xlsx
