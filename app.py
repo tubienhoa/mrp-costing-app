@@ -945,6 +945,9 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
                 if stg not in used_stages:
                     used_stages.append(stg)
             rmc = code if code_is_rm else (rm_col or code or rm_code_for(std, desc, mat))
+            # Namespace riêng cho NVL lá: tránh trùng mã với BTP/SG cha (vd GZ19726 → GZ19726) làm engine ngắt "vòng lặp"
+            if not any(ncode(rmc).startswith(p) for p in (ncode(prefix), "RM-") if p):
+                rmc = f"RM-{rmc}"
             uom = "Kg" if kg > 0 else (_val(r, "ĐVT", "") or "Cái")
             reg(rmc, "RM", name=std or desc or rmc, uom=uom, std=std or "", price=to_float(_val(r, "Đơn giá"), 0))
             add_edge(parent_code, rmc, qty * (kg if kg > 0 else 1.0), scrap, parent_occ)
