@@ -2133,10 +2133,13 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
     with tabs[4]:
         t1, t2, t3 = st.tabs(["📦 Tổng hợp nhu cầu MRP", "🧮 Ma trận R_cum (RM × FG)", "🗓️ Lịch rã WIP (DPP)"])
         with t1:
-            st.latex(r"Q_{MRP}(RM_k)=\sum_{FG_i\in SO} Q_{SO}(FG_i)\times R_{cum}(RM_k,FG_i)")
             mrp_t, n_tot = with_uom_totals(mrp)
             show_df(mrp_t, MRP_FMT, total=n_tot, height=400)
-            st.download_button("⬇️ Tải bảng MRP (CSV)", mrp.to_csv(index=False).encode("utf-8-sig"), "MRP.csv", "text/csv")
+            mrp_buf = io.BytesIO()
+            with pd.ExcelWriter(mrp_buf, engine="openpyxl") as writer:
+                mrp.to_excel(writer, index=False, sheet_name="Hoach_Dinh_MRP")
+            st.download_button("⬇️ Tải bảng MRP (Excel)", mrp_buf.getvalue(), "Metalic_MRP_Export.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         with t2:
             st.latex(r"R_{cum}(RM_k,FG_i)=\sum_{P}\prod_{(Pa,Ch)\in P} Rate(Pa,Ch)\times\left(1+\frac{Scrap(Pa,Ch)}{100}\right)")
             cols = [f"{l['Mã Sản Phẩm ERP']} (#{j + 1})" for j, l in enumerate(res["so_lines"])]
