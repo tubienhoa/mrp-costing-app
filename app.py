@@ -909,6 +909,9 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
         rmc = _val(r, "Mã NVL", "")
         if rmc or kg > 0 or std:
             rmc = rmc or rm_code_for(std, desc, mat)
+            # Namespace riêng cho NVL (như nhánh rm_leaf): tránh trùng mã với BTP/SG cha trước khi add_edge
+            if not any(ncode(rmc).startswith(p) for p in (ncode(prefix), "RM-") if p):
+                rmc = f"RM-{rmc}"
             uom = "Kg" if kg > 0 else (_val(r, "ĐVT", "") or "Cái")
             reg(rmc, "RM", name=std or f"{desc} {mat}".strip(), uom=uom, std=std or "", price=to_float(_val(r, "Đơn giá"), 0))
             add_edge(attach, rmc, kg if kg > 0 else 1.0, scrap, occ)
