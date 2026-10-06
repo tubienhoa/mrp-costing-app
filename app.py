@@ -2064,10 +2064,11 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
         if len(mrp):
             n_top = {"Top 5": 5, "Top 10": 10, "Top 25": 25}.get(top_sel, len(mrp))
             show_df(mrp.sort_values("Thành tiền (VND)", ascending=False).head(n_top), MRP_FMT, height=300)
-        if all_warn:
-            with st.expander(f"⚠️ Cảnh báo dữ liệu ({len(all_warn)})"):
-                for w in all_warn:
-                    st.write("• " + w)
+        # Ẩn danh sách cảnh báo dữ liệu để giữ Dashboard gọn (mảng all_warn vẫn được tính ở backend)
+        # if all_warn:
+        #     with st.expander(f"⚠️ Cảnh báo dữ liệu ({len(all_warn)})"):
+        #         for w in all_warn:
+        #             st.write("• " + w)
 
     # ---------------- SO & PO ----------------
     with tabs[1]:
