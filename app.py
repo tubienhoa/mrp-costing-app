@@ -746,6 +746,44 @@ def _val(rec, k, default=None):
     return default if is_blank(v) else v
 
 
+_NUM_RE = re.compile(r"\d+(?:[.,]\d+)?")
+_SHAPE_WORDS = ("tam", "hop", "ong", "tron")
+
+
+def _nums(s):
+    return [float(x.replace(",", ".")) for x in _NUM_RE.findall(s)]
+
+
+def _same_nums(a, b):
+    return len(a) == len(b) and all(abs(x - y) < 1e-6 for x, y in zip(a, b))
+
+
+def safe_fuzzy_match(bom_name, po_name):
+    """Khớp mờ an toàn tên NVL BOM ↔ tên PO: chỉ True khi chắc chắn cùng chủng loại và cùng kích thước số."""
+    b, p = norm(bom_name or ""), norm(po_name or "")
+    if not b or not p:
+        return False
+    has = lambda s, w: re.search(rf"\b{w}\b", s) is not None
+    bn, pn = _nums(b), _nums(p)
+    if not bn or not pn:
+        return False
+    if has(b, "thep") and has(b, "tam"):
+        kind_ok = has(p, "tam") and bn[0] == pn[0]
+        shapes = {"tam"}
+    elif has(b, "thep") and has(b, "hop"):
+        kind_ok = has(p, "hop") and _same_nums(sorted(bn), sorted(pn))
+        shapes = {"hop"}
+    elif (has(b, "thep") and has(b, "tron")) or has(b, "phi"):
+        kind_ok = (has(p, "tron") or has(p, "phi")) and _same_nums(bn, pn)
+        shapes = {w for w in _SHAPE_WORDS if has(b, w)}
+    else:
+        return False
+    if not kind_ok:
+        return False
+    # PO mang thêm chủng loại khác (vd BOM tròn đặc – PO ống) → không chắc chắn → loại
+    return all(w in shapes for w in _SHAPE_WORDS if has(p, w))
+
+
 def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
     W = []
     so_lines = so_df.to_dict("records")
@@ -1061,6 +1099,14 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
     for i, c in enumerate(rm_used):
         n = nodes[c]
         po = po_map.get(ncode(c)) or po_by_name.get(norm(n["name"])) or (po_by_name.get(norm(n["std"])) if n["std"] else None)
+        if po is None and po_by_name:
+            # Dự phòng: khớp mờ an toàn (chủng loại + kích thước số). Mơ hồ (nhiều giá khác nhau) → bỏ qua → 0đ.
+            hits = [rec for rec in po_by_name.values()
+                    if rec["price"] > 0 and (safe_fuzzy_match(n["std"] or n["name"], rec["name"])
+                                             or safe_fuzzy_match(n["name"], rec["name"]))]
+            if hits and len({round(h["price"], 2) for h in hits}) == 1:
+                po = hits[0]
+                W.append(f"Giá NVL {c} ({n['name']}) lấy theo khớp mờ an toàn với dòng PO '{po['name']}'.")
         # Thứ tự giá: (1) PO khớp > (2) BOM / Live Editor > (3) 0đ > (4) giá tạm Sidebar (chỉ khi người dùng bật).
         if po and po["price"] > 0:
             price, src = po["price"], f"PO: {po['po'] or 'không số'}"
