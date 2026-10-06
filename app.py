@@ -683,7 +683,18 @@ def parse_bom(data, filename):
 # =============================================================================
 
 
+NON_METAL_KEYWORDS = ["vermiculite", "ceramic", "kính", "kinh", "gỗ", "go", "giấy", "giay", "nilon", "sợi", "soi", "keo", "silicagel"]
+_NON_METAL_RE = re.compile(r"\b(?:" + "|".join(sorted({norm(k) for k in NON_METAL_KEYWORDS})) + r")\b")
+
+
+def is_non_metal(desc):
+    """Mô tả chứa từ khóa vật liệu phi kim loại (vermiculite, ceramic, kính...) – không phải phôi thép."""
+    return bool(_NON_METAL_RE.search(norm(desc or "")))
+
+
 def std_material_name(desc, material, t, w, l, w2=None):
+    if is_non_metal(desc):
+        return to_str(desc).strip()  # giữ nguyên tên gốc, không ép "Thép ..."
     d = norm(f"{desc} {material}")
     if not d:
         return None
@@ -923,12 +934,16 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
         stages = row_stages(r)
         is_leaf = not children[i]
         code_is_rm = bool(code) and bool(prefix) and ncode(code).startswith(prefix)
-        # Vật tư mua ngoài (COTS): ĐVT đếm được, không KL, không hình dạng phôi, không công đoạn → RM thẳng, không sinh BTP
-        cots = (kg <= 0 and not std and not stages and norm(_val(r, "ĐVT", "")) in COTS_UOMS)
+        # Vật tư mua ngoài (COTS): ĐVT đếm được, không KL, không hình dạng phôi → RM thẳng, không sinh BTP
+        # (kể cả khi dòng có gắn công đoạn; công đoạn vẫn được ghi nhận để tính TK 622/627)
+        cots = (kg <= 0 and (not std or is_non_metal(desc)) and norm(_val(r, "ĐVT", "")) in COTS_UOMS)
         rm_leaf = is_leaf and (code_is_rm or cots or (not stages and (not code or not fabricated)))
         if rm_leaf:
             if not code and not desc and not rm_col:
                 return
+            for stg in (stages if cots else []):
+                if stg not in used_stages:
+                    used_stages.append(stg)
             rmc = code if code_is_rm else (rm_col or code or rm_code_for(std, desc, mat))
             uom = "Kg" if kg > 0 else (_val(r, "ĐVT", "") or "Cái")
             reg(rmc, "RM", name=std or desc or rmc, uom=uom, std=std or "", price=to_float(_val(r, "Đơn giá"), 0))
