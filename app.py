@@ -928,6 +928,8 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
         scrap_v = _val(r, "Hao hụt (%)")
         scrap = to_float(scrap_v, default_scrap) if scrap_v is not None else default_scrap
         code = _val(r, "Mã chi tiết", "")
+        if parent_code and code and ncode(code) == ncode(parent_code):
+            code = f"{code}_P"  # con trùng mã cha → đổi sang dạng Part để không bị ngắt "vòng lặp"
         kg = to_float(_val(r, "KL NVL (kg)"), 0)
         desc, mat = _val(r, "Mô tả", ""), _val(r, "Vật liệu", "")
         std = std_material_name(desc, mat, to_float(_val(r, "Dày"), None), to_float(_val(r, "Rộng"), None),
