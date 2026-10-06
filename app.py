@@ -889,9 +889,18 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
                 out.append((seq if seq > 0 else pos + 1, pos, c[len(STAGE_PREFIX):]))
         return [name for _, _, name in sorted(out)]
 
+    anc_path = []  # mã (đã ncode) của mọi nút tổ tiên đang active trong nhánh hiện tại
+
     def process_inside(sh, rows, children, i, code, occ, scrap):
         if code in expanded and expanded[code] != occ:
             return  # nút dùng chung (DAG) – cấu trúc con đã được rã ở lần xuất hiện đầu tiên
+        anc_path.append(ncode(code))
+        try:
+            _process_inside(sh, rows, children, i, code, occ, scrap)
+        finally:
+            anc_path.pop()
+
+    def _process_inside(sh, rows, children, i, code, occ, scrap):
         r = rows[i]
         attach = code
         for stg in reversed(row_stages(r)):
@@ -928,8 +937,8 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
         scrap_v = _val(r, "Hao hụt (%)")
         scrap = to_float(scrap_v, default_scrap) if scrap_v is not None else default_scrap
         code = _val(r, "Mã chi tiết", "")
-        if parent_code and code and ncode(code) == ncode(parent_code):
-            code = f"{code}_P"  # con trùng mã cha → đổi sang dạng Part để không bị ngắt "vòng lặp"
+        if code and ncode(code) in anc_path:
+            code = f"{code}_P"  # trùng bất kỳ cha/ông/cụ nào → đổi sang dạng Part để không bị ngắt "vòng lặp"
         kg = to_float(_val(r, "KL NVL (kg)"), 0)
         desc, mat = _val(r, "Mô tả", ""), _val(r, "Vật liệu", "")
         std = std_material_name(desc, mat, to_float(_val(r, "Dày"), None), to_float(_val(r, "Rộng"), None),
@@ -999,7 +1008,11 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
                 scrap_v = _val(r, "Hao hụt (%)")
                 process_inside(sh, rows, children, i, fg, (sh, i), to_float(scrap_v, default_scrap) if scrap_v is not None else default_scrap)
             else:
-                process_row(sh, rows, children, i, fg, ("fgctx", fg))
+                anc_path.append(ncode(fg))
+                try:
+                    process_row(sh, rows, children, i, fg, ("fgctx", fg))
+                finally:
+                    anc_path.pop()
 
     # ---- chuẩn hóa loại nút ----
     ch = defaultdict(list)
