@@ -619,11 +619,7 @@ def parse_bom(data, filename):
             if scrap is not None and scrap_pct_fmt:
                 scrap *= 100  # ô định dạng % trong Excel (0.05 -> 5%)
             qty_v = to_float(gv("qty", True), None)
-            kl_v = to_float(gv("weight", True), None)
-            if "weight" not in mp and "weight_total" in mp:
-                kl_tot = to_float(gv("weight_total", True), None)
-                if kl_tot is not None:  # Tổng KL ÷ SL dòng = khối lượng đơn vị chuẩn
-                    kl_v = kl_tot / qty_v if qty_v and qty_v > 0 else kl_tot
+            kl_v = to_float(gv("weight", True), None)  # chỉ KL / 1 chi tiết; không suy ngược từ "Tổng KL"
             sheet_rows.append({
                 "Sheet": g["name"], "Dòng": r + 1, "MỤC": muc, "_indent": ind,
                 "Mã chi tiết": code, "Mô tả": desc, "Vật liệu": to_str(gv("material")),
@@ -666,6 +662,12 @@ def parse_bom(data, filename):
                 else:
                     d = 1 + (ind_levels.index(x["_indent"]) if len(ind_levels) > 1 else 0)
             x["Cấp"] = float(d)
+        # ---- Vật tư phụ (lá) khuyết Mã chi tiết: sinh mã RM-<slug(mô tả)> để không bị ghi đè/bỏ sót ----
+        for k, x in enumerate(sheet_rows):
+            nxt = sheet_rows[k + 1] if k + 1 < len(sheet_rows) else None
+            if (not x["Mã chi tiết"] and x["Mô tả"] and not x["Mã NVL"] and not (x["KL NVL (kg)"] or 0) > 0
+                    and (nxt is None or nxt["Cấp"] <= x["Cấp"]) and x["Cấp"] > 0):
+                x["Mã chi tiết"] = "RM-" + slug(x["Mô tả"], "-").upper()
         all_rows.extend(sheet_rows)
         infos.append({"sheet": g["name"], "status": f"OK – {len(sheet_rows)} dòng, tiêu đề dòng {h['row'] + 1}"
                       + (" (2 tầng)" if h["two"] else "") + (f" • MỤC đa cột ({len(muc_cols)} cấp)" if len(muc_cols) > 1 else "")
@@ -1000,7 +1002,8 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
         # Vật tư mua ngoài (COTS): ĐVT đếm được, không KL, không hình dạng phôi → RM thẳng, không sinh BTP
         # (kể cả khi dòng có gắn công đoạn; công đoạn vẫn được ghi nhận để tính TK 622/627)
         cots = (kg <= 0 and (not std or is_non_metal(desc)) and norm(_val(r, "ĐVT", "")) in COTS_UOMS)
-        rm_leaf = is_leaf and (code_is_rm or cots or (not stages and (not code or not fabricated)))
+        # Mọi node lá có SL/Cha > 0 mà không phải chi tiết gia công từ phôi (KL/hình dạng) → vật tư mua ngoài (RM)
+        rm_leaf = is_leaf and (code_is_rm or cots or not fabricated or (not stages and not code))
         if rm_leaf:
             if not code and not desc and not rm_col:
                 return
