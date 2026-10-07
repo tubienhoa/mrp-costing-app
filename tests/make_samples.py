@@ -42,9 +42,10 @@ ws2["A1"] = "ĐỊNH MỨC GHẾ"
 hdr = ["STT", "Mã chi tiết", "Tên chi tiết", "Vật liệu", "Dày", "Rộng", "Dài", "SL", "KL NVL (kg)", "Mã vật tư", "Công đoạn"]
 for i, v in enumerate(hdr, 1): ws2.cell(3, i, v)
 data2 = [
-    [1, "P-PLATE", "Tấm đế thép tấm", "SS400", 5, 400, 400, 1, 6.27, "R-P-S01-052-00-002", "Cắt CNC, Chấn"],
-    [2, "P-LEG", "Chân ghế thép hộp", "SS400", 1.2, 25, 25, 4, 0.42, None, "Cắt CNC - Hàn"],
-    [3, "P-PIPE", "Tay vịn ống", "SS400", 1.4, 21, 600, 2, 0, None, "Cắt CNC"],
+    [1, "FG-CHAIR-02", "Ghế thép", None, None, None, None, 1, None, None, None],
+    ["1.1", "P-PLATE", "Tấm đế thép tấm", "SS400", 5, 400, 400, 1, 6.27, "R-P-S01-052-00-002", "Cắt CNC, Chấn"],
+    ["1.2", "P-LEG", "Chân ghế thép hộp", "SS400", 1.2, 25, 25, 4, 0.42, None, "Cắt CNC - Hàn"],
+    ["1.3", "P-PIPE", "Tay vịn ống", "SS400", 1.4, 21, 600, 2, 0, None, "Cắt CNC"],
 ]
 for r, row in enumerate(data2, 4):
     for c, v in enumerate(row, 1):

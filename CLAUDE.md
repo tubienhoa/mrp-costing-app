@@ -45,14 +45,7 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
 
 - **Cây cha–con:** dựng theo thứ tự dòng + cột `Cấp`, dùng stack (không dựa vào tiền tố chuỗi MỤC, vì Excel làm mất "1.10" → 1.1).
   - Cách tính `Cấp`: MỤC dạng chấm `1.1.1` → số phần; MỤC chữ / La Mã → 0 (nhóm); MỤC trống khi file có dạng chấm → cấp số gần nhất + 1. Không có MỤC dạng chấm → dùng khoảng lùi đầu dòng (`alignment.indent`, dấu cách).
-- **Ghép FG giữa SO và BOM** (`match_fg`), theo thứ tự:
-  1. trùng Mã ERP;
-  2. trùng Mã KH;
-  3. Mã ERP có dạng `<tiền tố> - <mã BOM>`;
-  4. cột `Mã TP` trong BOM;
-  5. tên sheet / vùng tiêu đề chứa mã SO;
-  6. SO chỉ có 1 FG và BOM không khớp gì → gán cả BOM cho FG đó;
-  7. nếu vẫn không khớp → `NO-FG-<sheet>` kèm cảnh báo.
+- **Ghép FG giữa SO và BOM** (`match_fg`): khớp chặt chẽ 1-1 theo Mã ERP hoặc Mã KH (sau `ncode`). Nếu sai lệch, ném lỗi `FGMismatchError` hiển thị trên giao diện Streamlit (`st.error`) và dừng ứng dụng (`st.stop`). Không còn khớp theo tiền tố, cột `Mã TP`, tên sheet hay gán cưỡng bức.
 - **Phân loại dòng lá:**
   - Mã bắt đầu bằng tiền tố NVL (mặc định `R-`, đổi ở Sidebar) → RM, định mức = SL × (KL kg nếu > 0, ngược lại 1).
   - Dòng có Mã NVL / KL > 0 / nhận diện được hình dạng thép → chi tiết SG + một con RM.
@@ -99,7 +92,7 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
 |---|---|---|---|
 | 1 | Tiêu đề thành `"Bill of Materials \| CHIỀU DÀI"`; dòng `mm/inch` bị đọc như dữ liệu; CHIỀU DÀI bị gán thành "Vật liệu" | Ô gộp tiêu đề `H1:AD4` bị ghép với dòng tiêu đề thật ở dòng 5 | `detect_header`: chỉ ghép 2 tầng khi bản thân dòng trên khớp ≥ 2 cột; khi điểm bằng nhau trên cùng dòng thì **ưu tiên 2 tầng**. Các trường kích thước loại cột `inch`; `material` loại `bill of` |
 | 2 | Cây phẳng, mọi chi tiết rơi vào `NO-FG-FORM` → **MRP trống** | MỤC gộp `A5:E6`: **cấp = vị trí cột** (A7=1 là FG, B8=1 là chi tiết cấp 2) | `detect_header` trả `muc_cols` (các cột liền kề cùng tiêu đề MỤC). `parse_bom` dựng chuỗi `1`, `1.1` … `2.10` từ cột đầu tiên có giá trị |
-| 3 | FG không khớp | SO: `FG - SVC - SAV01829`; BOM: `SAV01829` (= Mã SP KH) | `match_fg`: khớp Mã KH và hậu tố `-<mã BOM>` của mã ERP (sau khi `ncode`) |
+| 3 | FG không khớp | SO: `FG - SVC - SAV01829`; BOM: `SAV01829` (= Mã SP KH) | `match_fg`: khớp Mã KH (sau khi `ncode`) |
 | 4 | Thứ tự BTP sai; "DIỆN TÍCH BỀ MẶT SƠN" bị coi là công đoạn Sơn | Ô công đoạn chứa **số thứ tự** (Cắt=1, Chấn=2; FG: Hàn 1 → Xi mạ 2 → Đóng gói 3), không phải `x` | Cột công đoạn lưu dạng float; `row_stages()` sắp theo (số thứ tự, vị trí cột). `STAGE_EXCL` loại `dien tich, m2, tong, hoan thien, be mat` |
 | 5 | Cộng thừa 1% hao hụt | "TỈ LỆ HAO HỤT" = **hệ số** (1, 0.95…), đã nhân sẵn trong công thức KL nguyên liệu `=H*J*N*Q*10^-6*R` | `parse_bom`: tiêu đề không có `%`, mọi giá trị thuộc (0, 1] và ô không định dạng % → chế độ hệ số. Có cột KL → hao hụt = 0; không có cột KL → `(1/f − 1) × 100` |
 
@@ -124,13 +117,10 @@ Các quy tắc khác:
 
 ## 5. Quy tắc đặt tên NVL và giá mặc định
 
-- `std_material_name()` (đặc tả mục 2.3), nhận diện hình dạng từ `MÔ TẢ` + `Vật liệu` (đã `norm`), theo thứ tự:
-  1. **hộp** → `Thép hộp {A}x{B}x{T}` nếu có cột `Rộng B`. ⚠️ Đây là **lệch có chủ ý** so với đặc tả `{Dài}x{Rộng}x{Dày}`: với Savic, Dài là chiều dài cắt 750, đặt theo đặc tả sẽ ra "Thép hộp 750x80x3". Không có `Rộng B` thì dùng đúng đặc tả. **Chờ người dùng xác nhận.**
-  2. **ống** → `Thép ống phi {Rộng}x{Dày}x{Dài}`
-  3. **tròn đặc / láp / trục** → `Thép tròn đặc phi {Rộng}`
-  4. **tấm** → `Thép tấm {Dày:.1f}` (ví dụ `8.0`, `1.5`)
-  - Thiếu kích thước thì thử đọc từ mô tả (`phi 20`, `t=8`, `40x40x2`).
-- Mã RM khi BOM không có Mã NVL: lấy mã PO nếu tên PO trùng tên chuẩn; ngược lại sinh `RM-` + slug (ví dụ `RM-THEP-TAM-8.0`, `RM-THEP-HOP-80X80X3`).
+- Tên NVL: **nhận diện động (Dynamic Parsing)** chủng loại vật tư từ cột `MÔ TẢ` và `Vật liệu`. Hệ thống tự trích xuất tên vật liệu thực tế (Thép, Nhôm, Inox, Nhựa...) ghép với thông số kích thước (Tấm, Hộp, Ống, Tròn) để sinh mã RM chuẩn hóa (ví dụ: `Nhôm tấm 2.0` → `RM-NHOM-TAM-2.0`). Tuyệt đối không gắn cứng dữ liệu.
+  - Định dạng kích thước theo hình dạng: tấm `{tên} {Dày:.1f}`; hộp `{tên} {A}x{B}x{T}` (có `Rộng B`; không có thì `{Dài}x{Rộng}x{Dày}`); ống `{tên} phi {Rộng}x{Dày}x{Dài}`; tròn `{tên} phi {Rộng}`. Thiếu kích thước thì thử đọc từ mô tả (`phi 20`, `t=8`, `40x40x2`).
+  - ⚠️ Thép hộp dùng A×B×T khi có `Rộng B` là **lệch có chủ ý** so với đặc tả (Savic: Dài = chiều dài cắt 750). **Chờ người dùng xác nhận.**
+- Mã RM khi BOM không có Mã NVL: lấy mã PO nếu tên PO trùng tên chuẩn; ngược lại sinh `RM-` + slug của tên (ví dụ `RM-THEP-TAM-8.0`, `RM-NHUA-POM-PHI-20`).
 - ĐVT: KL nguyên liệu > 0 → `Kg`; ngược lại lấy ĐVT của dòng hoặc `Cái`.
 - **Giá tham khảo ở Sidebar: 22,000 VND/kg** (ĐVT Kg), **5,000 VND** cho ĐVT khác (Cái/Bộ…; `unit_price`) – **2 ô này chỉ là giá tham khảo, không còn tự động áp**; chỉ dùng cho dòng còn 0đ khi bật "Áp giá tạm từ Sidebar". Mặc định không có PO (và không có giá Editor) thì giá NVL = 0đ, TK 621 = 0 (có cảnh báo trên UI). Tỷ giá 25,400 (ô B6). SG&A 5%, thuế TNDN 20%, lead time 21 ngày, 50 SP/pallet, tiền tố NVL `R-`.
 - Đơn giá công đoạn mặc định (`DEFAULT_STAGE_RATES`, VND/SP, chỉ là số gợi ý): cắt 12k/6k, chấn 8k/4k, khoan 6k/3k, hàn 25k/12k, mài 6k/3k, sơn 18k/15k, mạ 15k/12k, lắp 15k/6k, đóng gói 8k/3k; còn lại 10k/5k (nhân công / SXC).

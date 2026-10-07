@@ -833,21 +833,10 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
             so_norm[kh] = l["Mã Sản Phẩm ERP"]
     so_name = {l["Mã Sản Phẩm ERP"]: l["Tên Thành Phẩm"] for l in so_lines}
 
-    so_suffix = [(ncode(l["Mã Sản Phẩm ERP"]), l["Mã Sản Phẩm ERP"]) for l in so_lines]
-
     def match_fg(v):
-        """Khớp mã BOM -> mã FG trong SO: trùng Mã ERP, trùng Mã KH, hoặc Mã ERP có dạng
-        '<tiền tố> - <mã BOM>' (VD: 'FG - SVC - SAV01829' <-> 'SAV01829')."""
+        """Khớp 1-1 tuyệt đối mã BOM -> mã FG trong SO: chỉ trùng Mã ERP hoặc trùng Mã KH (sau ncode); không thì None."""
         c = ncode(v)
-        if not c:
-            return None
-        if c in so_norm:
-            return so_norm[c]
-        if len(c) >= 4:
-            for k, erp in so_suffix:
-                if k.endswith("-" + c):
-                    return erp
-        return None
+        return so_norm.get(c) if c else None
 
     # ---- danh mục PO (kịch bản 3 tệp) ----
     po_map, po_by_name = {}, {}
@@ -931,19 +920,11 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
             stack.append(i)
         trees[sh] = (rows, children, [i for i in range(len(rows)) if parent[i] is None])
 
-    def sheet_fg_of(sh):
-        ctx = ncode(sheet_ctx.get(sh, sh))
-        best = None
-        for k, v in so_norm.items():
-            if len(k) >= 3 and k in ctx and (best is None or len(k) > len(best[0])):
-                best = (k, v)
-        return best[1] if best else None
-
     def row_match(r):
         return match_fg(_val(r, "Mã chi tiết", "")) or None
 
     def subtree_has_match(rows, children, i):
-        if row_match(rows[i]) or match_fg(_val(rows[i], "Mã TP", "")):
+        if row_match(rows[i]):
             return True
         return any(subtree_has_match(rows, children, c) for c in children[i])
 
@@ -1047,10 +1028,6 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
             if fg:
                 out.append((fg, i, True))
                 continue
-            fgc = match_fg(_val(r, "Mã TP", ""))
-            if fgc:
-                out.append((fgc, i, False))
-                continue
             if children[i] and any(subtree_has_match(rows, children, c) for c in children[i]):
                 out.extend(resolve(rows, children, children[i]))
                 continue
@@ -1058,13 +1035,10 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
         return out
 
     for sh, (rows, children, roots) in trees.items():
-        sfg = sheet_fg_of(sh)
         for fg, i, is_fg_row in resolve(rows, children, roots):
             r = rows[i]
             if fg is None:
-                if sfg:
-                    fg = sfg
-                elif children[i]:
+                if children[i]:
                     fg = _val(r, "Mã chi tiết", "") or f"{sh}-{_val(r, 'MỤC', i + 1)}"
                     is_fg_row = True
                     W.append(f"[{sh}] Cụm gốc '{fg}' không có trong SO – nhu cầu = 0.")
