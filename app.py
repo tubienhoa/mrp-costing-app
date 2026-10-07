@@ -282,6 +282,10 @@ BOM_SPEC = [
     ("weight", [r"(khoi luong|trong luong|\bkl\b).*(nguyen lieu|nvl|phoi|vat lieu|\bnl\b)",
                 r"raw (material )?weight|blank weight", r"khoi luong|trong luong|\bweight\b|\bkl\b"],
      r"thanh pham|\btinh\b|\bnet\b|\btong\b"),
+    # Dự phòng: "TỔNG KL nguyên liệu" (chỉ dùng khi không có cột KL đơn vị; parse_bom chia cho SL dòng)
+    ("weight_total", [r"\btong\b.*(khoi luong|trong luong|\bkl\b).*(nguyen lieu|nvl|phoi|vat lieu|\bnl\b)",
+                      r"(khoi luong|trong luong|\bkl\b).*(nguyen lieu|nvl|phoi|vat lieu|\bnl\b).*\btong\b"],
+     r"thanh pham|\btinh\b|\bnet\b"),
     ("desc", [r"mo ta|ten (chi tiet|goi|hang|san pham|vat tu|cum|bo phan)|description|dien giai", r"^ten\b|\bten\b"], None),
     ("material", [r"vat lieu|^material|mac thep|^mac\b|\bgrade\b|chat lieu"], r"\bma\b|code|bill of"),
     ("thick", [r"(^|\| )(day|do day|chieu day|thk|thickness|t)( ?\(mm\)| mm)?$", r"\bdo day\b|\bchieu day\b|thickness|\bday\b"], r"\bdai\b|so luong|inch"),
@@ -614,12 +618,18 @@ def parse_bom(data, filename):
             scrap_pct_fmt = bool(sc_ci is not None and sc_ci < len(g["pct"][r]) and g["pct"][r][sc_ci])
             if scrap is not None and scrap_pct_fmt:
                 scrap *= 100  # ô định dạng % trong Excel (0.05 -> 5%)
+            qty_v = to_float(gv("qty", True), None)
+            kl_v = to_float(gv("weight", True), None)
+            if "weight" not in mp and "weight_total" in mp:
+                kl_tot = to_float(gv("weight_total", True), None)
+                if kl_tot is not None:  # Tổng KL ÷ SL dòng = khối lượng đơn vị chuẩn
+                    kl_v = kl_tot / qty_v if qty_v and qty_v > 0 else kl_tot
             sheet_rows.append({
                 "Sheet": g["name"], "Dòng": r + 1, "MỤC": muc, "_indent": ind,
                 "Mã chi tiết": code, "Mô tả": desc, "Vật liệu": to_str(gv("material")),
                 "Dày": to_float(gv("thick"), None), "Rộng": to_float(gv("width"), None),
                 "Rộng B": to_float(gv("width2"), None), "Dài": to_float(gv("length"), None),
-                "SL/Cha": to_float(gv("qty", True), None), "KL NVL (kg)": to_float(gv("weight", True), None),
+                "SL/Cha": qty_v, "KL NVL (kg)": kl_v,
                 "Mã NVL": rmc, "ĐVT": to_str(gv("uom")), "Hao hụt (%)": scrap,
                 "Đơn giá": to_float(gv("price"), None), "Mã TP": to_str(gv("fg_code")),
                 "_stages": stages, "_scrap_pct_fmt": scrap_pct_fmt,
@@ -634,8 +644,8 @@ def parse_bom(data, filename):
                     if f is None or x["_scrap_pct_fmt"]:
                         continue
                     # Có cột KL nguyên liệu: hệ số đã nhân sẵn trong công thức KL -> không cộng thêm hao hụt
-                    x["Hao hụt (%)"] = 0.0 if "weight" in mp else round((1 / f - 1) * 100, 6)
-                scrap_note = " • Tỉ lệ hao hụt dạng hệ số" + (" (đã gồm trong KL nguyên liệu)" if "weight" in mp else "")
+                    x["Hao hụt (%)"] = 0.0 if "weight" in mp or "weight_total" in mp else round((1 / f - 1) * 100, 6)
+                scrap_note = " • Tỉ lệ hao hụt dạng hệ số" + (" (đã gồm trong KL nguyên liệu)" if "weight" in mp or "weight_total" in mp else "")
         # ---- Xác định cấp (Cấp) theo cột MỤC hoặc khoảng lùi đầu dòng ----
         has_dotted = any(re.fullmatch(DOTTED_RE, x["MỤC"]) and re.search(r"\d[.\-]\d", x["MỤC"]) for x in sheet_rows)
         ind_levels = sorted({x["_indent"] for x in sheet_rows})
@@ -692,43 +702,62 @@ def is_non_metal(desc):
     return bool(_NON_METAL_RE.search(norm(desc or "")))
 
 
+_DIM_STRIP_RE = re.compile(r"(?<![A-Za-z0-9])(?:(?:phi|ø|t\s*=)\s*)?\d+(?:[.,]\d+)?(?:\s*[x×]\s*\d+(?:[.,]\d+)?)*", re.I)
+# (nhãn hình dạng, regex nhận diện trên chuỗi đã norm) – theo thứ tự ưu tiên; tên chủng loại lấy động từ đầu vào
+_SHAPES = (
+    ("hop", r"\bhop\b|\bbox\b|\brhs\b|\bshs\b|hop vuong|hop chu nhat"),
+    ("ong", r"\bong\b|\bpipe\b|\btube\b"),
+    ("tron", r"tron dac|\blap\b|round bar|\btron\b|\btruc\b|\bphi\b|ø"),
+    ("tam", r"\btam\b|\bplate\b|\bsheet\b|\btole\b|\bton\b|\bpl\b|\bla thep\b"),
+)
+_SHAPE_LABEL = {"hop": "hộp", "ong": "ống", "tron": "tròn đặc", "tam": "tấm"}
+
+
 def std_material_name(desc, material, t, w, l, w2=None):
+    """Tên NVL chuẩn: phần chữ (chủng loại vật liệu) lấy động từ MÔ TẢ / Vật liệu, phần kích thước ghép theo hình dạng
+    (tấm/hộp/ống/tròn). VD: 'Nhôm tấm' + dày 2 -> 'Nhôm tấm 2.0'; 'Nhựa POM phi 20' -> 'Nhựa POM phi 20'."""
     if is_non_metal(desc):
-        return to_str(desc).strip()  # giữ nguyên tên gốc, không ép "Thép ..."
+        return to_str(desc).strip()  # giữ nguyên tên gốc phi kim loại
     d = norm(f"{desc} {material}")
     if not d:
         return None
+    shape = next((k for k, pat in _SHAPES if re.search(pat, d)), None)
+    if shape is None:
+        return None
+    pat = dict(_SHAPES)[shape]
+    # Phần chữ: ưu tiên MÔ TẢ, nếu MÔ TẢ không chứa hình dạng thì lấy Vật liệu
+    src = next((to_str(x) for x in (desc, material) if to_str(x) and re.search(pat, norm(to_str(x)))), "")
+    base = re.sub(r"\s+", " ", _DIM_STRIP_RE.sub(" ", src)).strip(" -,;:()")
+    base = re.sub(r"(?i)\s*\b(?:phi|ø)$", "", base).strip()
+    if not base:
+        base = _SHAPE_LABEL[shape].capitalize()
 
-    def from_desc(pat):
-        m = re.search(pat, d)
+    def from_desc(p):
+        m = re.search(p, d)
         return to_float(m.group(1), None) if m else None
 
-    if re.search(r"\bhop\b|\bbox\b|\brhs\b|\bshs\b|hop vuong|hop chu nhat", d):
-        if w and w2 and t:  # BOM có đủ 2 cạnh tiết diện A x B -> quy cách thép hộp A x B x T
-            return f"Thép hộp {fmt_dim(w)}x{fmt_dim(w2)}x{fmt_dim(t)}"
-        if l and w and t:
-            return f"Thép hộp {fmt_dim(l)}x{fmt_dim(w)}x{fmt_dim(t)}"
-        m = re.search(r"(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)", d)
-        if m:
-            a, b, c = (to_float(m.group(i)) for i in (1, 2, 3))
-            return f"Thép hộp {fmt_dim(a)}x{fmt_dim(b)}x{fmt_dim(c)}"
-        return None
-    if re.search(r"\bong\b|\bpipe\b|\btube\b", d):
-        ww = w or from_desc(r"(?:phi|ø|o|d)\s*(\d+(?:[.,]\d+)?)")
+    num = r"(\d+(?:[.,]\d+)?)"
+    if shape == "hop":
+        if w and w2 and t:  # BOM có đủ 2 cạnh tiết diện A x B -> quy cách A x B x T
+            dims = (w, w2, t)
+        elif l and w and t:
+            dims = (l, w, t)
+        else:
+            m = re.search(rf"{num}\s*x\s*{num}\s*x\s*{num}", d)
+            if not m:
+                return None
+            dims = tuple(to_float(m.group(i)) for i in (1, 2, 3))
+        return f"{base} " + "x".join(fmt_dim(v) for v in dims)
+    if shape == "ong":
+        ww = w or from_desc(rf"(?:phi|ø|o|d)\s*{num}")
         if ww and t:
-            return f"Thép ống phi {fmt_dim(ww)}x{fmt_dim(t)}" + (f"x{fmt_dim(l)}" if l else "")
+            return f"{base} phi {fmt_dim(ww)}x{fmt_dim(t)}" + (f"x{fmt_dim(l)}" if l else "")
         return None
-    if re.search(r"tron dac|\blap\b|round bar|\btron\b|\btruc\b", d):
-        ww = w or from_desc(r"(?:phi|ø|d)\s*(\d+(?:[.,]\d+)?)")
-        if ww:
-            return f"Thép tròn đặc phi {fmt_dim(ww)}"
-        return None
-    if re.search(r"\btam\b|\bplate\b|\bsheet\b|\btole\b|\bton\b|\bpl\b|\bla thep\b", d):
-        tt = t or from_desc(r"(?:\bt\s*=?\s*|day\s*|\bpl\s*)(\d+(?:[.,]\d+)?)")
-        if tt:
-            return f"Thép tấm {fmt_plate(tt)}"
-        return None
-    return None
+    if shape == "tron":
+        ww = w or from_desc(rf"(?:phi|ø|d)\s*{num}")
+        return f"{base} phi {fmt_dim(ww)}" if ww else None
+    tt = t or from_desc(rf"(?:\bt\s*=?\s*|day\s*|\bpl\s*){num}") or from_desc(rf"\b(?:tam|plate|sheet)\s*{num}")
+    return f"{base} {fmt_plate(tt)}" if tt else None
 
 
 # =============================================================================
@@ -782,6 +811,14 @@ def safe_fuzzy_match(bom_name, po_name):
         return False
     # PO mang thêm chủng loại khác (vd BOM tròn đặc – PO ống) → không chắc chắn → loại
     return all(w in shapes for w in _SHAPE_WORDS if has(p, w))
+
+
+class FGMismatchError(Exception):
+    """Mã thành phẩm trong SO không khớp bất kỳ mã nào trong BOM kỹ thuật."""
+
+    def __init__(self, codes):
+        super().__init__(", ".join(codes))
+        self.codes = codes
 
 
 def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
@@ -910,13 +947,6 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
             return True
         return any(subtree_has_match(rows, children, c) for c in children[i])
 
-    any_match = any(subtree_has_match(rows, ch, i) for rows, ch, roots in trees.values() for i in roots) or \
-        any(sheet_fg_of(sh) for sh in trees)
-    unique_fg = list(dict.fromkeys(l["Mã Sản Phẩm ERP"] for l in so_lines))
-    single_fallback = unique_fg[0] if (len(unique_fg) == 1 and not any_match) else None
-    if single_fallback:
-        W.append(f"BOM không chứa mã FG nào khớp SO – gán toàn bộ BOM cho FG duy nhất '{single_fallback}'.")
-
     def row_stages(r):
         """Công đoạn được đánh dấu tại dòng, sắp theo số thứ tự (1, 2, 3...) rồi theo vị trí cột."""
         out = []
@@ -1032,8 +1062,8 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
         for fg, i, is_fg_row in resolve(rows, children, roots):
             r = rows[i]
             if fg is None:
-                if sfg or single_fallback:
-                    fg = sfg or single_fallback
+                if sfg:
+                    fg = sfg
                 elif children[i]:
                     fg = _val(r, "Mã chi tiết", "") or f"{sh}-{_val(r, 'MỤC', i + 1)}"
                     is_fg_row = True
@@ -1082,13 +1112,15 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
         return res
 
     fg_cum = {}
+    missing_fg = []
     for l in so_lines:
         fg = l["Mã Sản Phẩm ERP"]
         if fg not in nodes:
-            W.append(f"FG '{fg}' trong SO không có BOM – không phát sinh nhu cầu NVL.")
-            nodes[fg] = {"code": fg, "type": "FG", "name": l["Tên Thành Phẩm"], "uom": l["ĐVT"], "std": "",
-                         "stage": "", "seq": 0, "price_bom": 0.0}
+            missing_fg.append(fg)
+            continue
         fg_cum[fg] = cum(fg, frozenset([fg]))
+    if missing_fg:  # không ép gán: dừng và báo lỗi để người dùng đồng bộ lại mã
+        raise FGMismatchError(list(dict.fromkeys(missing_fg)))
 
     rm_codes = [c for c, n in nodes.items() if n["type"] == "RM"]
     rm_used = [c for c in rm_codes if any(fg_cum[l["Mã Sản Phẩm ERP"]].get(c, 0) > 0 for l in so_lines)]
@@ -2090,7 +2122,12 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
     rate_ed = render_rates(stage_names, f"rates_{bom_key}")
 
     # ---------------- Bộ máy tính toán ----------------
-    res = run_engine(edited, stage_cols, sheet_ctx, so_df, po_df, P)
+    try:
+        res = run_engine(edited, stage_cols, sheet_ctx, so_df, po_df, P)
+    except FGMismatchError as exc:
+        for fg_code in exc.codes:
+            st.error(f"Lỗi Dữ Liệu Chủ: Mã thành phẩm '{fg_code}' trong file Đơn hàng bán (SO) không tồn tại trong file BOM Kỹ thuật. Vui lòng kiểm tra và đồng bộ lại mã!")
+        st.stop()
     used = res["used_stages"]
     rate_map = {r["Công đoạn"]: r for r in rate_ed.to_dict("records")}
     stage_rates = [{"stage": s, "labor": to_float(rate_map.get(s, {}).get("Nhân công VND/SP"), 0),
