@@ -282,10 +282,6 @@ BOM_SPEC = [
     ("weight", [r"(khoi luong|trong luong|\bkl\b).*(nguyen lieu|nvl|phoi|vat lieu|\bnl\b)",
                 r"raw (material )?weight|blank weight", r"khoi luong|trong luong|\bweight\b|\bkl\b"],
      r"thanh pham|\btinh\b|\bnet\b|\btong\b"),
-    # Dự phòng: "TỔNG KL nguyên liệu" (chỉ dùng khi không có cột KL đơn vị; parse_bom chia cho SL dòng)
-    ("weight_total", [r"\btong\b.*(khoi luong|trong luong|\bkl\b).*(nguyen lieu|nvl|phoi|vat lieu|\bnl\b)",
-                      r"(khoi luong|trong luong|\bkl\b).*(nguyen lieu|nvl|phoi|vat lieu|\bnl\b).*\btong\b"],
-     r"thanh pham|\btinh\b|\bnet\b"),
     ("desc", [r"mo ta|ten (chi tiet|goi|hang|san pham|vat tu|cum|bo phan)|description|dien giai", r"^ten\b|\bten\b"], None),
     ("material", [r"vat lieu|^material|mac thep|^mac\b|\bgrade\b|chat lieu"], r"\bma\b|code|bill of"),
     ("thick", [r"(^|\| )(day|do day|chieu day|thk|thickness|t)( ?\(mm\)| mm)?$", r"\bdo day\b|\bchieu day\b|thickness|\bday\b"], r"\bdai\b|so luong|inch"),
@@ -640,8 +636,8 @@ def parse_bom(data, filename):
                     if f is None or x["_scrap_pct_fmt"]:
                         continue
                     # Có cột KL nguyên liệu: hệ số đã nhân sẵn trong công thức KL -> không cộng thêm hao hụt
-                    x["Hao hụt (%)"] = 0.0 if "weight" in mp or "weight_total" in mp else round((1 / f - 1) * 100, 6)
-                scrap_note = " • Tỉ lệ hao hụt dạng hệ số" + (" (đã gồm trong KL nguyên liệu)" if "weight" in mp or "weight_total" in mp else "")
+                    x["Hao hụt (%)"] = 0.0 if "weight" in mp else round((1 / f - 1) * 100, 6)
+                scrap_note = " • Tỉ lệ hao hụt dạng hệ số" + (" (đã gồm trong KL nguyên liệu)" if "weight" in mp else "")
         # ---- Xác định cấp (Cấp) theo cột MỤC hoặc khoảng lùi đầu dòng ----
         has_dotted = any(re.fullmatch(DOTTED_RE, x["MỤC"]) and re.search(r"\d[.\-]\d", x["MỤC"]) for x in sheet_rows)
         ind_levels = sorted({x["_indent"] for x in sheet_rows})

@@ -97,6 +97,7 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
 | 5 | Cộng thừa 1% hao hụt | "TỈ LỆ HAO HỤT" = **hệ số** (1, 0.95…), đã nhân sẵn trong công thức KL nguyên liệu `=H*J*N*Q*10^-6*R` | `parse_bom`: tiêu đề không có `%`, mọi giá trị thuộc (0, 1] và ô không định dạng % → chế độ hệ số. Có cột KL → hao hụt = 0; không có cột KL → `(1/f − 1) × 100` |
 
 Các quy tắc khác:
+- **Strict Mode:** TUYỆT ĐỐI không đọc và không sử dụng cột TỔNG KHỐI LƯỢNG (`weight_total`) để làm dự phòng (Fallback) nhằm ngăn chặn lỗi Double Multiplier trong đồ thị DAG. Lõi tính toán chỉ sử dụng duy nhất cột Khối lượng đơn vị (Unit weight).
 - Tiêu đề SO Savic ở dòng 4: `Mã Thành Phẩm ERP`, `Số Lượng (Cái)`, `Đơn Giá (USD)` (được nhận là FOB). Các dòng STT 3–15 không có mã sẽ bị bỏ qua.
 - BOM Savic: `KHỐI LƯỢNG NGUYÊN LIỆU (kg)` (cột T) là **khối lượng / 1 chi tiết** → định mức = SL × T. Cột U (`TỔNG KL`) và các cột KL thành phẩm **không dùng**.
 - Sheet `Data` (bảng tra tỷ trọng) tự bị bỏ qua vì không có tiêu đề BOM. Vùng tính phụ ở dòng 30–35 và dòng `TOTAL` cũng bị bỏ qua.
