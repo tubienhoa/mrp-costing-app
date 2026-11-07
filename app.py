@@ -727,6 +727,8 @@ def std_material_name(desc, material, t, w, l, w2=None):
     src = next((to_str(x) for x in (desc, material) if to_str(x) and re.search(pat, norm(to_str(x)))), "")
     base = re.sub(r"\s+", " ", _DIM_STRIP_RE.sub(" ", src)).strip(" -,;:()")
     base = re.sub(r"(?i)\s*\b(?:phi|ø)$", "", base).strip()
+    if base.count("(") > base.count(")"):
+        base += ")" * (base.count("(") - base.count(")"))  # strip() ở trên có thể cắt mất dấu ) đóng
     if not base:
         base = _SHAPE_LABEL[shape].capitalize()
 
@@ -737,7 +739,7 @@ def std_material_name(desc, material, t, w, l, w2=None):
     num = r"(\d+(?:[.,]\d+)?)"
     if shape == "hop":
         if w and w2 and t:  # BOM có đủ 2 cạnh tiết diện A x B -> quy cách A x B x T
-            dims = (w, w2, t)
+            dims = (min(w, w2), max(w, w2), t)  # chuẩn hóa thứ tự cạnh: 25.4x31.8 = 31.8x25.4
         elif l and w and t:
             dims = (l, w, t)
         else:
@@ -749,7 +751,7 @@ def std_material_name(desc, material, t, w, l, w2=None):
     if shape == "ong":
         ww = w or from_desc(rf"(?:phi|ø|o|d)\s*{num}")
         if ww and t:
-            return f"{base} phi {fmt_dim(ww)}x{fmt_dim(t)}" + (f"x{fmt_dim(l)}" if l else "")
+            return f"{base} phi {fmt_dim(ww)}x{fmt_dim(t)}"  # không tách mã theo chiều dài
         return None
     if shape == "tron":
         ww = w or from_desc(rf"(?:phi|ø|d)\s*{num}")
@@ -801,7 +803,11 @@ def safe_fuzzy_match(bom_name, po_name):
         kind_ok = has(p, "hop") and _same_nums(sorted(bn), sorted(pn))
         shapes = {"hop"}
     elif (has(b, "thep") and has(b, "tron")) or has(b, "phi"):
-        kind_ok = (has(p, "tron") or has(p, "phi")) and _same_nums(bn, pn)
+        if has(b, "ong") and len(bn) == 2:
+            # Ống tròn: mã BOM chỉ gồm phi x dày → PO có thể ghi thêm chiều dài, chỉ so 2 số đầu
+            kind_ok = (has(p, "ong") or has(p, "phi")) and len(pn) >= 2 and _same_nums(bn, pn[:2])
+        else:
+            kind_ok = (has(p, "tron") or has(p, "phi")) and _same_nums(bn, pn)
         shapes = {w for w in _SHAPE_WORDS if has(b, w)}
     else:
         return False

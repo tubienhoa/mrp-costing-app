@@ -119,7 +119,7 @@ Các quy tắc khác:
 ## 5. Quy tắc đặt tên NVL và giá mặc định
 
 - Tên NVL: **nhận diện động (Dynamic Parsing)** chủng loại vật tư từ cột `MÔ TẢ` và `Vật liệu`. Hệ thống tự trích xuất tên vật liệu thực tế (Thép, Nhôm, Inox, Nhựa...) ghép với thông số kích thước (Tấm, Hộp, Ống, Tròn) để sinh mã RM chuẩn hóa (ví dụ: `Nhôm tấm 2.0` → `RM-NHOM-TAM-2.0`). Tuyệt đối không gắn cứng dữ liệu.
-  - Định dạng kích thước theo hình dạng: tấm `{tên} {Dày:.1f}`; hộp `{tên} {A}x{B}x{T}` (có `Rộng B`; không có thì `{Dài}x{Rộng}x{Dày}`); ống `{tên} phi {Rộng}x{Dày}x{Dài}`; tròn `{tên} phi {Rộng}`. Thiếu kích thước thì thử đọc từ mô tả (`phi 20`, `t=8`, `40x40x2`).
+  - Định dạng kích thước theo hình dạng: tấm `{tên} {Dày:.1f}`; hộp `{tên} {A}x{B}x{T}` (có `Rộng B`, sắp cạnh nhỏ trước; không có thì `{Dài}x{Rộng}x{Dày}`); ống tròn `{tên} phi {Rộng}x{Dày}` (**không tách mã theo chiều dài**; khác tên như "Thép ống (Gọt đường hàn)" thì vẫn tách mã; khớp PO mờ chỉ so phi + dày); tròn đặc `{tên} phi {Rộng}`. Thiếu kích thước thì thử đọc từ mô tả (`phi 20`, `t=8`, `40x40x2`).
   - ⚠️ Thép hộp dùng A×B×T khi có `Rộng B` là **lệch có chủ ý** so với đặc tả (Savic: Dài = chiều dài cắt 750). **Chờ người dùng xác nhận.**
 - Mã RM khi BOM không có Mã NVL: lấy mã PO nếu tên PO trùng tên chuẩn; ngược lại sinh `RM-` + slug của tên (ví dụ `RM-THEP-TAM-8.0`, `RM-NHUA-POM-PHI-20`).
 - ĐVT: KL nguyên liệu > 0 → `Kg`; ngược lại lấy ĐVT của dòng hoặc `Cái`.
