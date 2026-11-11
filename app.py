@@ -13,6 +13,7 @@ Chạy:  streamlit run app.py
 import csv
 import datetime as dt
 import hashlib
+import html
 import io
 import math
 import re
@@ -2042,18 +2043,42 @@ def render_tree(res, fg, max_rows=3000):
 
 
 def clean_slate():
+    """Màn hình chờ: hướng dẫn ngắn gọn 3 bước + 2 kịch bản giá (thay banner lớn cũ)."""
     st.markdown(
         """
-<div class="hero">
-  <h2>🏭 Hệ thống đang ở trạng thái chờ (Clean Slate)</h2>
-  <p>Vui lòng nạp <b>tối thiểu 2 tệp bắt buộc</b> ở phía trên để kích hoạt bộ máy rã BOM & MRP:</p>
+<div class="guide">
+  <div class="guide-title">Chưa có dữ liệu – làm theo 3 bước để bắt đầu</div>
+  <ol class="guide-steps">
+    <li><b>Nạp đơn hàng SO</b> – số lượng và giá FOB (USD) của từng mã thành phẩm.</li>
+    <li><b>Nạp BOM kỹ thuật</b> – mỗi thành phẩm 1 file, chọn nhiều file cùng lúc được.
+        Mã FG trong BOM phải trùng mã ERP hoặc mã KH trong SO.</li>
+    <li>Bấm <b>Tính toán MRP</b>.</li>
+  </ol>
+  <div class="guide-note">
+    <span><b>Có file PO:</b> đơn giá NVL, số PO và nhà cung cấp lấy từ PO.</span>
+    <span><b>Không có PO:</b> đơn giá NVL = 0đ – nhập giá ở tab Live BOM Editor, hoặc bật "Áp giá tạm" ở thanh bên.</span>
+  </div>
 </div>""", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
-    c1.markdown("##### 1️⃣ Sales Order (SO)\n**BẮT BUỘC** – Sản lượng & Giá bán FOB ($USD) theo mã SKU thành phẩm.")
-    c2.markdown("##### 2️⃣ Technical BOM\n**BẮT BUỘC** – Cấu trúc kỹ thuật đa cấp, tiêu hao NVL & công đoạn gia công.")
-    c3.markdown("##### 3️⃣ Purchase Order (PO)\n*TÙY CHỌN* – Đơn giá mua thực tế, số PO & nhà cung cấp.")
-    st.info("📌 Kịch bản 2 tệp (SO + BOM): mở khóa 100% tính toán, đơn giá lấy từ BOM / Live Editor / Sidebar.  \n"
-            "📌 Kịch bản 3 tệp (SO + BOM + PO): đối chiếu danh mục NVL rã từ BOM sang PO để lấy đơn giá & số PO thực tế.")
+
+
+def upload_card(col, step, title, required, desc, key, multiple=False):
+    """Thẻ nạp file: số bước + tiêu đề + nhãn Bắt buộc/Tùy chọn + mô tả 1 dòng + ô upload (ẩn nhãn để thẳng hàng)."""
+    tag = '<span class="up-tag req">Bắt buộc</span>' if required else '<span class="up-tag opt">Tùy chọn</span>'
+    with col.container(border=True, key=f"upcard_{step}"):
+        st.markdown(f'<div class="up-head"><span class="up-step">{step}</span><span class="up-title">{title}</span>'
+                    f'{tag}</div><div class="up-desc">{desc}</div>', unsafe_allow_html=True)
+        return st.file_uploader(title, type=["xlsx", "xlsm", "csv"], key=key, accept_multiple_files=multiple,
+                                label_visibility="collapsed")
+
+
+def file_chip(label, files):
+    """Chip trạng thái nạp file cho thanh hành động."""
+    files = [f for f in (files if isinstance(files, list) else [files]) if f]
+    if not files:
+        return f'<span class="chip off">{label}: chưa nạp</span>'
+    txt = files[0].name if len(files) == 1 else f"{len(files)} file"
+    tip = html.escape(", ".join(f.name for f in files), quote=True)
+    return f'<span class="chip on" title="{tip}">✓ {label}: {html.escape(txt)}</span>'
 
 
 def main():
@@ -2073,38 +2098,61 @@ header[data-testid="stHeader"]{display:none !important}
 [data-testid="stVerticalBlock"]{gap:.5rem}
 [data-testid="stSidebarHeader"]{padding-top:0 !important;height:1.5rem !important}
 [data-testid="stSidebarUserContent"]{padding-top:.5rem !important}
-[data-testid="stFileUploaderDropzone"]{padding:.35rem .6rem !important;min-height:0 !important}
+[data-testid="stFileUploaderDropzone"]{padding:.4rem .6rem !important;min-height:0 !important;
+border:1px dashed rgba(128,128,128,.45) !important;border-radius:8px !important}
 [data-testid="stFileUploaderDropzoneInstructions"]{display:none !important}
-[data-testid="stFileUploader"] label p{font-size:.85rem;margin-bottom:0}
 [data-testid="stFileUploader"] section+div{padding-top:.2rem}
-.btn-spacer{height:1.65rem}
-.st-key-act_btns button{font-size:13px !important;font-weight:600 !important;padding:.35rem .5rem !important;
-white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !important}
+/* Thẻ nạp file */
+[class*="st-key-upcard_"]{gap:.35rem !important}
+.up-head{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem .5rem;line-height:1.3}
+.up-step{flex:none;width:1.45rem;height:1.45rem;border-radius:50%;background:#1F3864;color:#fff;font-size:.8rem;
+font-weight:700;display:inline-flex;align-items:center;justify-content:center}
+.up-title{font-weight:700;font-size:.98rem}
+.up-tag{margin-left:auto;flex:none;font-size:.68rem;font-weight:700;padding:.1rem .45rem;border-radius:999px;
+text-transform:uppercase;letter-spacing:.02em}
+.up-tag.req{background:rgba(198,40,40,.12);color:#C62828}
+.up-tag.opt{background:rgba(128,128,128,.16);color:inherit;opacity:.8}
+[class*="st-key-upcard_"] [data-testid="stMarkdownContainer"]{margin-bottom:0 !important}
+.up-desc{font-size:.8rem;opacity:.72;line-height:1.35;margin:.15rem 0 .2rem 0 !important}
+/* Thanh hành động */
+.chips{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center}
+.chip{font-size:.78rem;padding:.2rem .6rem;border-radius:999px;white-space:nowrap;max-width:22rem;
+overflow:hidden;text-overflow:ellipsis}
+.chip.on{background:rgba(46,125,50,.13);color:#2E7D32;font-weight:600}
+.chip.off{background:rgba(128,128,128,.13);opacity:.75}
+.st-key-act_bar button{font-weight:600 !important}
+.st-key-act_bar button p{white-space:nowrap !important}
+/* Màn hình chờ */
+.guide{border:1px solid rgba(128,128,128,.28);border-left:4px solid #2E75B6;border-radius:10px;
+padding:.9rem 1.2rem;margin-top:.4rem}
+.guide-title{font-weight:700;font-size:1.02rem;margin-bottom:.4rem}
+.guide-steps{margin:0 0 .6rem 1.2rem;padding:0}
+.guide-steps li{margin:.2rem 0;font-size:.9rem}
+.guide-note{display:flex;flex-direction:column;gap:.15rem;font-size:.82rem;opacity:.8;
+border-top:1px solid rgba(128,128,128,.22);padding-top:.5rem}
 </style>""", unsafe_allow_html=True)
-    h_title, h_status = st.columns([6, 4], vertical_alignment="center")
+    h_title, h_status = st.columns([7, 3], vertical_alignment="center")
     h_title.markdown(f'<p class="app-title">🏭 {APP_TITLE}</p>', unsafe_allow_html=True)
     status_ph = h_status.empty()
 
     # ---------------- Nạp dữ liệu đầu vào (màn hình chính) ----------------
     gen = st.session_state.get("_gen", 0)  # đổi số này để reset các ô file uploader
-    up1, up2, up3, b1 = st.columns([2.5, 2.5, 2.5, 2.2], vertical_alignment="top")
-    with up1:
-        so_file = st.file_uploader("1. SO (BẮT BUỘC)", type=["xlsx", "xlsm", "csv"], key=f"up_so_{gen}")
-    with up2:
-        bom_files = st.file_uploader("2. BOM (BẮT BUỘC – chọn được nhiều file)", type=["xlsx", "xlsm", "csv"],
-                                     key=f"up_bom_{gen}", accept_multiple_files=True,
-                                     help="Mỗi file BOM ứng với 1 (hoặc nhiều) thành phẩm trong SO. "
-                                          "Chọn cùng lúc nhiều file hoặc kéo thả thêm.")
-    with up3:
-        po_file = st.file_uploader("3. PO (TÙY CHỌN)", type=["xlsx", "xlsm", "csv"], key=f"up_po_{gen}")
-    with b1:
-        st.markdown('<div class="btn-spacer"></div>', unsafe_allow_html=True)
-        with st.container(key="act_btns"):
-            btn_calc = st.button("🚀 TÍNH TOÁN MRP", type="primary", width="stretch",
-                                 disabled=not (so_file and bom_files),
-                                 help="Chỉ khi nhấn nút này hệ thống mới đọc file, rã BOM, tính MRP và giá thành.")
-            btn_reset = st.button("🗑️ XÓA DỮ LIỆU", width="stretch",
-                                  help="Xóa toàn bộ kết quả đã tính và các tệp đã nạp, quay về trạng thái chờ.")
+    up1, up2, up3 = st.columns(3)
+    so_file = upload_card(up1, 1, "Đơn hàng bán (SO)", True,
+                          "Số lượng & giá FOB (USD) theo mã thành phẩm.", f"up_so_{gen}")
+    bom_files = upload_card(up2, 2, "BOM kỹ thuật", True,
+                            "Mỗi thành phẩm 1 file – chọn nhiều file cùng lúc.", f"up_bom_{gen}", multiple=True)
+    po_file = upload_card(up3, 3, "Đơn mua hàng (PO)", False,
+                          "Đơn giá mua thực tế, số PO & nhà cung cấp.", f"up_po_{gen}")
+    with st.container(key="act_bar"):
+        a1, a2, a3 = st.columns([4.4, 2.3, 1.5], vertical_alignment="center")
+        a1.markdown('<div class="chips">' + file_chip("SO", so_file) + file_chip("BOM", bom_files or [])
+                    + file_chip("PO", po_file) + "</div>", unsafe_allow_html=True)
+        btn_calc = a2.button("🚀 TÍNH TOÁN MRP", type="primary", width="stretch",
+                             disabled=not (so_file and bom_files),
+                             help="Đọc file, rã BOM, tính MRP và giá thành. Cần tối thiểu SO + BOM.")
+        btn_reset = a3.button("🗑️ Xóa", width="stretch",
+                              help="Xóa kết quả và các tệp đã nạp, quay về trạng thái chờ.")
 
     with st.sidebar:
         st.header("⚙️ Thông số hệ thống")
