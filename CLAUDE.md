@@ -1,19 +1,23 @@
 # CLAUDE.md – METALIC ERP COSTING & MRP AUTOMATION PORTAL
 
-> Cập nhật lần cuối: 2026-10-02. Đọc file này trước khi sửa `app.py`.
+> Cập nhật lần cuối: 2026-11-11. Đọc file này trước khi sửa `app.py`.
 > Đặc tả gốc: `PRD_SPEC.md` (nguồn sự thật cho công thức và danh sách sheet).
 
 ## 1. Bối cảnh dự án
 
 - Ứng dụng **Streamlit một file** (`app.py`) cho công ty cơ khí xuất khẩu **Metalic**.
 - Chức năng: rã Technical BOM đa cấp → BOM ERP (FG / SG / BTP / RM) → MRP → hạch toán TK 621/622/627 → P&L → xuất **Excel Master 25 sheet, 100% công thức sống**.
-- Đầu vào: **SO** (bắt buộc), **Technical BOM** (bắt buộc), **PO** (tùy chọn); định dạng `.xlsx/.xlsm/.csv`.
+- Đầu vào: **SO** (bắt buộc), **Technical BOM** (bắt buộc, **nạp được nhiều file**, thường mỗi file 1 FG), **PO** (tùy chọn); định dạng `.xlsx/.xlsm/.csv`.
+  - Nhiều file BOM: `parse_bom_multi()` gọi `parse_bom` cho từng file, đổi nhãn cột `Sheet` thành `<file> › <sheet>` (`FILE_SEP`, `source_file()`) để mỗi file dựng cây riêng, hợp nhất cột công đoạn theo `slug` tên (file thiếu → 0). 1 file thì giữ nguyên hành vi cũ (nhãn chỉ là tên sheet).
+  - 1 FG nằm ở ≥ 2 file → `DuplicateFGError`, UI `st.error` + `st.stop` (tránh nhân đôi nhu cầu). File không chứa FG nào của SO → cảnh báo "file thừa".
+  - Mã chi tiết dùng chung mà định mức khác nhau (KL, Mã NVL, kích thước, công đoạn, cây con – **không** so mô tả) → cảnh báo `⚠️`, dùng cấu trúc lần đầu (`struct_sig`, `first_sig` trong `run_engine`). Cảnh báo bắt đầu bằng `⚠️` luôn hiện ở tab Tổng quan.
+  - Tab SO có bảng **Đối chiếu SO ↔ BOM** (FG → file BOM → chuỗi công đoạn).
   - Kịch bản 2 tệp: **không có PO → đơn giá NVL = 0** (nguồn giá `Chưa nạp PO (0đ)`), TK 621 = 0, trừ khi người dùng gõ giá ở BOM / Live BOM Editor.
   - Kịch bản 3 tệp: danh mục NVL lấy từ BOM làm gốc, đối chiếu sang PO để lấy đơn giá, số PO và NCC (khớp → `PO: <số PO>`; không khớp → giá BOM / Live Editor nếu có, ngược lại 0, `Chưa có giá PO (0đ)`).
   - Thứ tự giá 4 bước: (1) PO khớp > (2) BOM / Live Editor > (3) 0đ (`Chưa có giá PO (0đ)` hoặc `Chưa nạp PO (0đ)`) > (4) giá tạm Sidebar (chỉ khi bật checkbox). Chi tiết ở mục 2.
 - Chưa nạp đủ SO + BOM → màn hình chờ (`clean_slate()`), gọi `st.stop()`.
 - Môi trường: Windows 11, Python 3.14, Streamlit 1.63, pandas 3.0, openpyxl 3.1. Chạy app: `streamlit run app.py`.
-- Dự án **chưa dùng git**.
+- Git: `origin` = `github.com/tubienhoa/mrp-costing-app`, nhánh `main`. Tag `v1.0-stable` = bản trước khi hỗ trợ nhiều BOM.
 
 ### File dữ liệu thật của người dùng (ngoài repo)
 
@@ -60,7 +64,7 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
   3. Cả hai đều không có → **0**; nguồn `Chưa có giá PO (0đ)` (có PO nhưng không khớp) hoặc `Chưa nạp PO (0đ)` (không có PO).
   4. Giá vẫn ≤ 0 và người dùng bật checkbox Sidebar "Áp giá tạm từ Sidebar" (`P["apply_sidebar"]`) → `kg_price` (Kg) / `unit_price` (ĐVT khác), nguồn `Giá tạm Sidebar`.
   Giá 0 → có cảnh báo; tab Giá thành & P&L hiện `st.warning` khi TK 621 = 0.
-- **TK 622 / 627** = Tổng SL SO × Σ đơn giá các công đoạn **có xuất hiện trong BOM** (đúng công thức đặc tả).
+- **TK 622 / 627 theo từng FG** (lệch có chủ ý so với đặc tả, người dùng duyệt 2026-11-11): `Σ_FG SL_FG × Σ đơn giá các công đoạn mà FG đó đi qua`. `run_engine` trả `fg_stages` (công đoạn của BTP trong `fg_cum[fg]` + `cots_stages` của vật tư mua ngoài). `compute_financials` trả `stage_qty` (SL SP qua từng công đoạn). Excel: sheet 22/23 cột D = tổng `'02'!G` của các FG có công đoạn; sheet 20 cột F/G = tổng ô đơn giá sheet 22/23 của các công đoạn thuộc FG.
 - **NPAT** = `MAX(0, EBIT × (1 − %thuế))` – theo đúng đặc tả. Lỗ thì hiện 0 và có cảnh báo.
 
 ### Excel Master (`build_master_excel`)
@@ -78,12 +82,15 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
 - `PRD_SPEC.md` – đặc tả gốc.
 - `requirements.txt` – streamlit, pandas, openpyxl.
 - `tests/` – script kiểm thử, chạy bằng `python <file>` **từ trong thư mục `tests/`**:
-  - `make_samples.py` – sinh `sample_so/bom/po.xlsx` (BOM tiêu đề 2 tầng, ô gộp, nút dùng chung, sheet ghép FG theo ngữ cảnh).
+  - `make_samples.py` – sinh `sample_so/bom/po.xlsx` (BOM tiêu đề 2 tầng, ô gộp, nút dùng chung, sheet ghép FG theo ngữ cảnh) và bộ tách file: `sample_bom_table.xlsx`, `sample_bom_chair.xlsx`, `sample_bom_chair_diff.xlsx` (BAS-01 KL 0.2 ≠ 0.157), `sample_bom_extra.xlsx` (FG không có trong SO).
+  - `test_multi_bom.py` – nhiều BOM: tách = gộp, trùng FG → lỗi, mã dùng chung lệch → cảnh báo, file thừa → cảnh báo, TK 622/627 theo FG, công thức Excel 20/22.
   - `test_engine.py` – chạy parser + engine + xuất `master.xlsx` trên dữ liệu mẫu (`--nopo` = kịch bản 2 tệp).
   - `test_indent.py` – SO dạng CSV + BOM phân cấp bằng khoảng lùi đầu dòng.
   - `diag_savic.py` – chẩn đoán trên file Savic thật (`-e` để in cạnh BOM ERP và P&L).
   - `verify_xlsx.py`, `verify_savic.py` – tính lại công thức Excel bằng thư viện `formulas` và so với Python. Cần chạy `pip install formulas` (hoặc `--target tests/pylib`). Lỗi `#NAME?` ở `HYPERLINK` (sheet 01) là do thư viện không hỗ trợ hàm này, Excel vẫn chạy bình thường.
-  - `ui_test.py` – Streamlit `AppTest` cho các kịch bản 0 (clean slate) / 2 / 3 / S (Savic). Giả lập `st.file_uploader`.
+  - `ui_test.py` – Streamlit `AppTest` cho các kịch bản 0 (clean slate) / 2 / 3 / S (Savic) / M (nhiều BOM + cảnh báo) / D (trùng FG → lỗi). Giả lập `st.file_uploader` (trả list khi `accept_multiple_files`).
+  - Trên Windows chạy test với `PYTHONUTF8=1` (console cp1252 không in được tiếng Việt).
+  - `verify_xlsx.py` trên mẫu báo 26 lỗi công thức: 25 `#NAME?` của `HYPERLINK` + 1 `#REF!` – **có sẵn từ `v1.0-stable`**, chưa điều tra.
   - `dump.py <file.xlsx> [maxrows]` – in giá trị, công thức, ô gộp, khoảng lùi của từng sheet. **Luôn chạy script này trước khi sửa parser cho một file mới.**
 
 ## 4. Quy tắc đọc file thật – 5 lỗi cấu trúc đã giải quyết (BOM Savic, sheet `Form`)
@@ -113,7 +120,8 @@ Các quy tắc khác:
   - Thép tấm 10.0 = 291.47
   - Thép tròn đặc phi 32 = 148.92
   - 6 mã RM, 33 mã BTP, 67 cạnh BOM ERP.
-- Excel Savic tính lại khớp Python: TK 621 = 679,725,036 **khi bật áp giá tạm Sidebar** (không PO + không bật: TK 621 = 0); giá thành/SP 1,813,751 và 1,764,875 (với NC 10,000 / SXC 5,000 mỗi công đoạn, giá 22,000/kg).
+- Excel Savic tính lại khớp Python: TK 621 = 679,725,036 **khi bật áp giá tạm Sidebar** (không PO + không bật: TK 621 = 0); với NC 10,000 / SXC 5,000 mỗi công đoạn, giá 22,000/kg: giá thành/SP `SS-050-04570` = 1,798,751 (5 công đoạn, không Phay tiện), `SAV01829` = 1,764,875 (6 công đoạn); TK 622 = 22,000,000, TK 627 = 11,000,000. (Trước khi tính công đoạn theo FG: 1,813,751 / 24,000,000.)
+- Nhiều BOM (`tests/test_multi_bom.py`): nạp `sample_bom_table.xlsx` + `sample_bom_chair.xlsx` phải cho MRP **giống hệt** nạp `sample_bom.xlsx` (8 mã RM, 862.50 / 12,540.00).
 - Dữ liệu mẫu (`tests/`): `R-O-S01-00-032-001 = 862.50 kg`, `R-P-S01-052-00-002 = 12,540.00 kg` (mốc nghiệm thu trong đặc tả, hằng `ACCEPTANCE`). ⚠️ Đây là dữ liệu **tự dựng** cho khớp mốc. File thật chứa 2 mã này **chưa được xác định** (có thể là Jack Pad hoặc GP Orcana).
 
 ## 5. Quy tắc đặt tên NVL và giá mặc định
@@ -138,11 +146,11 @@ Các quy tắc khác:
    - cho phép đổi tên / ghép mã RM tự sinh (bảng ánh xạ RM);
    - tận dụng cột "HOÀN THIỆN BỀ MẶT" (ví dụ "Mạ kẽm nhúng nóng");
    - khi PO dùng tên khác tên chuẩn ("Thép tấm 5ly"), khớp mờ theo độ dày;
-   - đưa thư mục vào git.
+   - Live BOM Editor: bộ lọc theo file BOM (cần cơ chế ghép lại phần đã sửa của các file khác).
 
 ## 7. Lưu ý khi sửa code
 
-- Sau mọi thay đổi parser/engine, chạy lại tối thiểu: `tests/test_engine.py` (862.50 / 12,540), `tests/diag_savic.py` (tổng 30,896.59) và `tests/ui_test.py` (0 exception).
+- Sau mọi thay đổi parser/engine, chạy lại tối thiểu: `tests/make_samples.py`, `tests/test_engine.py` (862.50 / 12,540), `tests/test_multi_bom.py`, `tests/diag_savic.py` (tổng 30,896.59) và `tests/ui_test.py` (0 exception).
 - Khi thêm regex vào `*_SPEC`: thứ tự field = thứ tự ưu tiên. Mỗi cột chỉ được gán cho 1 field. Field có hậu tố `#` (ví dụ `"Mã Sản Phẩm ERP#"`) là phương án dự phòng chạy sau.
 - `norm("Mã")` và `norm("Mạ")` đều thành `"ma"`. Đừng nới lỏng `STAGE_EXCL`.
 - Sửa nội dung PowerShell bằng `.Replace()` với chuỗi `@'...'@`: `` `n `` **không** được mở rộng trong chuỗi nháy đơn (đã từng làm mất một dòng regex). Nên dùng công cụ Edit.

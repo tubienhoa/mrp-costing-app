@@ -53,6 +53,24 @@ for r, row in enumerate(data2, 4):
 # indent-based sub child of P-LEG without dotted MỤC -> flat (all level 1) on this sheet
 wb.save(os.path.join(OUT, "sample_bom.xlsx"))
 
+# ---------------- Bản tách: mỗi FG 1 file BOM (kịch bản nạp nhiều BOM) ----------------
+for keep, fn in (("BOM BAN", "sample_bom_table.xlsx"), ("FG-CHAIR-02", "sample_bom_chair.xlsx")):
+    wbx = openpyxl.load_workbook(os.path.join(OUT, "sample_bom.xlsx"))
+    for name in list(wbx.sheetnames):
+        if name != keep:
+            wbx.remove(wbx[name])
+    wbx.save(os.path.join(OUT, fn))
+# Ghế bản sửa: dùng chung mã BAS-01 với bàn nhưng KL khác (0.2 kg) → phải có cảnh báo định mức lệch
+wbx = openpyxl.load_workbook(os.path.join(OUT, "sample_bom_chair.xlsx"))
+wsx = wbx["FG-CHAIR-02"]
+for c, v in enumerate(["1.4", "BAS-01", "Bas thép tấm", "SS400", 8, 50, 50, 2, 0.2, None, "Cắt CNC"], 1):
+    wsx.cell(8, c, v)
+wbx.save(os.path.join(OUT, "sample_bom_chair_diff.xlsx"))
+# File thừa: FG không có trong SO
+wbx = openpyxl.load_workbook(os.path.join(OUT, "sample_bom_chair.xlsx"))
+wbx["FG-CHAIR-02"]["B4"] = "FG-STOOL-99"
+wbx.save(os.path.join(OUT, "sample_bom_extra.xlsx"))
+
 # ---------------- SO ----------------
 wb = openpyxl.Workbook(); ws = wb.active; ws.title = "SO"
 ws["A1"] = "SALES ORDER"; ws.merge_cells("A1:I1")

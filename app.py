@@ -686,6 +686,40 @@ def parse_bom(data, filename):
     return df, stage_cols, sheet_ctx, infos, warns
 
 
+def parse_bom_multi(files):
+    """Đọc nhiều file Technical BOM (mỗi file thường 1 FG) và ghép thành 1 bảng.
+    files: [(bytes, tên file)]. Nhãn cột Sheet = "<file> › <sheet>" khi có ≥ 2 file để mỗi file dựng cây riêng.
+    Cột công đoạn hợp nhất theo slug tên (file thiếu công đoạn → 0)."""
+    if len(files) == 1:
+        return parse_bom(files[0][0], files[0][1])
+    names = [n for _, n in files]
+    dup_names = {n for n in names if names.count(n) > 1}
+    parts, canon, sheet_ctx, infos, warns = [], {}, {}, [], []
+    for k, (data, fname) in enumerate(files):
+        label = f"{fname} (#{k + 1})" if fname in dup_names else fname
+        try:
+            df, sc, ctx, inf, w = parse_bom(data, fname)
+        except Exception as e:
+            raise ValueError(f"File BOM '{fname}': {e}") from e
+        ren = {}
+        for c in sc:
+            disp = c[len(STAGE_PREFIX):]
+            ren[c] = STAGE_PREFIX + canon.setdefault(slug(disp), disp)
+        df = df.rename(columns=ren)
+        df["Sheet"] = [f"{label}{FILE_SEP}{s}" for s in df["Sheet"]]
+        parts.append(df)
+        sheet_ctx.update({f"{label}{FILE_SEP}{s}": v for s, v in ctx.items()})
+        infos.extend(dict(i, sheet=f"{label}{FILE_SEP}{i['sheet']}", file=label) for i in inf)
+        warns.extend(f"[{label}] {x}" for x in w)
+    stage_cols = [STAGE_PREFIX + d for d in canon.values()]
+    for df in parts:
+        for c in stage_cols:
+            if c not in df.columns:
+                df[c] = 0.0
+    df = pd.concat([p[BOM_BASE_COLS + stage_cols] for p in parts], ignore_index=True)
+    return df, stage_cols, sheet_ctx, infos, warns
+
+
 # =============================================================================
 # 6. ĐỊNH DANH NGUYÊN VẬT LIỆU THÔ (MỤC 2.3)
 # =============================================================================
@@ -825,6 +859,22 @@ class FGMismatchError(Exception):
         self.codes = codes
 
 
+class DuplicateFGError(Exception):
+    """Một thành phẩm xuất hiện ở nhiều file BOM khác nhau → nguy cơ nhân đôi nhu cầu."""
+
+    def __init__(self, dup):
+        super().__init__("; ".join(f"{k}: {', '.join(v)}" for k, v in dup.items()))
+        self.dup = dup  # {mã FG: [file 1, file 2, ...]}
+
+
+FILE_SEP = " › "  # nhãn nguồn khi nạp nhiều file BOM: "<tên file> › <tên sheet>"
+
+
+def source_file(sheet_label):
+    """Tên file BOM nguồn từ nhãn cột Sheet (1 file thì nhãn chỉ là tên sheet → trả về '')."""
+    return sheet_label.split(FILE_SEP, 1)[0] if FILE_SEP in str(sheet_label) else ""
+
+
 def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
     W = []
     so_lines = so_df.to_dict("records")
@@ -943,10 +993,34 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
         return [name for _, _, name in sorted(out)]
 
     anc_path = []  # mã (đã ncode) của mọi nút tổ tiên đang active trong nhánh hiện tại
+    first_sig = {}  # mã → (chữ ký cấu trúc lần rã đầu tiên, nhãn nguồn, KL)
+    sig_warned = set()
+
+    def struct_sig(rows, children, i):
+        """Chữ ký định mức của 1 dòng + toàn bộ cây con (không gồm SL/Cha của chính dòng – đó là định mức của cha)."""
+        r = rows[i]
+        # chỉ các yếu tố quyết định định mức (mô tả / ghi chú khác nhau không tính là lệch)
+        own = (round(to_float(_val(r, "KL NVL (kg)"), 0), 6), ncode(_val(r, "Mã NVL", "")),
+               tuple(round(to_float(_val(r, k), 0), 4) for k in ("Dày", "Rộng", "Rộng B", "Dài")),
+               tuple(row_stages(r)))
+        kids = sorted(repr((ncode(_val(rows[c], "Mã chi tiết", "")) or norm(_val(rows[c], "Mô tả", "")),
+                            round(to_float(_val(rows[c], "SL/Cha"), 0), 6), struct_sig(rows, children, c)))
+                      for c in children[i])
+        return repr((own, kids))
 
     def process_inside(sh, rows, children, i, code, occ, scrap):
         if code in expanded and expanded[code] != occ:
-            return  # nút dùng chung (DAG) – cấu trúc con đã được rã ở lần xuất hiện đầu tiên
+            # nút dùng chung (DAG) – cấu trúc con đã được rã ở lần xuất hiện đầu tiên; cảnh báo nếu định mức khác nhau
+            prev = first_sig.get(code)
+            if prev and code not in sig_warned and prev[0] != struct_sig(rows, children, i):
+                sig_warned.add(code)
+                kl = to_float(_val(rows[i], "KL NVL (kg)"), 0)
+                kl_txt = f" (KL {prev[2]:g} kg / {kl:g} kg)" if (prev[2] or kl) and prev[2] != kl else ""
+                W.append(f"⚠️ Mã {code} có định mức / cấu trúc khác nhau giữa '{prev[1]}' và '{sh}'{kl_txt} – "
+                         f"đang dùng '{prev[1]}'. Vui lòng kiểm tra lại BOM.")
+            return
+        if code not in first_sig:
+            first_sig[code] = (struct_sig(rows, children, i), sh, to_float(_val(rows[i], "KL NVL (kg)"), 0))
         anc_path.append(ncode(code))
         try:
             _process_inside(sh, rows, children, i, code, occ, scrap)
@@ -1017,7 +1091,9 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
             if not any(ncode(rmc).startswith(p) for p in (ncode(prefix), "RM-") if p):
                 rmc = f"RM-{rmc}"
             uom = "Kg" if kg > 0 else (_val(r, "ĐVT", "") or "Cái")
-            reg(rmc, "RM", name=std or desc or rmc, uom=uom, std=std or "", price=to_float(_val(r, "Đơn giá"), 0))
+            n_rm = reg(rmc, "RM", name=std or desc or rmc, uom=uom, std=std or "", price=to_float(_val(r, "Đơn giá"), 0))
+            if cots and stages:  # công đoạn gắn trên vật tư mua ngoài → ghi nhận để tính TK 622/627 theo từng FG
+                n_rm.setdefault("cots_stages", set()).update(stages)
             add_edge(parent_code, rmc, qty * (kg if kg > 0 else 1.0), scrap, parent_occ)
             return
         code = code or f"{parent_code}-{_val(r, 'MỤC', '') or i + 1}"
@@ -1039,9 +1115,15 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
             out.append((None, i, False))
         return out
 
+    fg_files = defaultdict(list)  # FG (khớp SO) → các file BOM chứa nó
+    files_with_fg = set()
     for sh, (rows, children, roots) in trees.items():
         for fg, i, is_fg_row in resolve(rows, children, roots):
             r = rows[i]
+            if fg is not None:
+                files_with_fg.add(source_file(sh))
+                if sh not in fg_files[fg]:
+                    fg_files[fg].append(sh)
             if fg is None:
                 if children[i]:
                     fg = _val(r, "Mã chi tiết", "") or f"{sh}-{_val(r, 'MỤC', i + 1)}"
@@ -1060,6 +1142,18 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
                     process_row(sh, rows, children, i, fg, ("fgctx", fg))
                 finally:
                     anc_path.pop()
+
+    # ---- Nhiều file BOM: 1 FG chỉ được nằm trong 1 file; file không chứa FG nào của SO → cảnh báo ----
+    dup = {}
+    for fg, labels in fg_files.items():
+        files = list(dict.fromkeys(source_file(x) for x in labels if source_file(x)))
+        if len(files) > 1:
+            dup[fg] = files
+    if dup:
+        raise DuplicateFGError(dup)
+    for f in dict.fromkeys(source_file(sh) for sh in trees):
+        if f and f not in files_with_fg:
+            W.append(f"⚠️ File BOM '{f}' không chứa thành phẩm nào có trong SO – nhu cầu = 0 (file thừa?).")
 
     # ---- chuẩn hóa loại nút ----
     ch = defaultdict(list)
@@ -1100,6 +1194,18 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
         fg_cum[fg] = cum(fg, frozenset([fg]))
     if missing_fg:  # không ép gán: dừng và báo lỗi để người dùng đồng bộ lại mã
         raise FGMismatchError(list(dict.fromkeys(missing_fg)))
+
+    # ---- Công đoạn riêng của từng FG (TK 622/627 theo đúng công đoạn FG đó đi qua) ----
+    fg_stages = {}
+    for fg, cm in fg_cum.items():
+        sts = set()
+        for c, v in cm.items():
+            if v <= 0:
+                continue
+            if nodes[c]["type"] == "BTP" and nodes[c]["stage"]:
+                sts.add(nodes[c]["stage"])
+            sts.update(nodes[c].get("cots_stages", ()))
+        fg_stages[fg] = [s for s in stage_order if s in sts]
 
     rm_codes = [c for c, n in nodes.items() if n["type"] == "RM"]
     rm_used = [c for c in rm_codes if any(fg_cum[l["Mã Sản Phẩm ERP"]].get(c, 0) > 0 for l in so_lines)]
@@ -1164,7 +1270,8 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
 
     return {"nodes": nodes, "edges": edges, "children": ch, "fg_cum": fg_cum, "so_lines": so_lines,
             "rm_used": rm_used, "R": R, "mrp_df": mrp_df, "wip": wip, "warnings": W,
-            "used_stages": [s for s in stage_order if s in used_stages]}
+            "used_stages": [s for s in stage_order if s in used_stages], "fg_stages": fg_stages,
+            "fg_source": {fg: fg_files.get(fg, []) for fg in fg_cum}}
 
 
 def compute_financials(res, so_df, stage_rates, P):
@@ -1172,21 +1279,28 @@ def compute_financials(res, so_df, stage_rates, P):
     mrp = res["mrp_df"]
     er = P["er"]
     total_qty = float(so_df["Số Lượng"].sum())
-    labor_sum = sum(r["labor"] for r in stage_rates)
-    oh_sum = sum(r["oh"] for r in stage_rates)
+    rate_of = {r["stage"]: r for r in stage_rates}
+    fg_stages = res.get("fg_stages", {})
     prices = list(mrp["Đơn giá (VND)"]) if len(mrp) else []
-    sku = []
+    sku, tk622, tk627 = [], 0.0, 0.0
     for j, l in enumerate(so_lines):
+        # Chỉ cộng đơn giá các công đoạn mà chính FG này đi qua (không gán công đoạn của FG khác)
+        sts = [s for s in fg_stages.get(l["Mã Sản Phẩm ERP"], rate_of) if s in rate_of]
+        labor = sum(rate_of[s]["labor"] for s in sts)
+        oh = sum(rate_of[s]["oh"] for s in sts)
+        tk622 += l["Số Lượng"] * labor
+        tk627 += l["Số Lượng"] * oh
         mat = sum(res["R"][i][j] * prices[i] for i in range(len(prices)))
-        unit = mat + labor_sum + oh_sum
+        unit = mat + labor + oh
         sell = l["Giá Bán FOB ($USD)"] * er
         sku.append({"Mã TP": l["Mã Sản Phẩm ERP"], "Tên TP": l["Tên Thành Phẩm"], "Số lượng": l["Số Lượng"],
-                    "CP NVL/SP": mat, "CP NC/SP": labor_sum, "CP SXC/SP": oh_sum, "Giá thành/SP": unit,
+                    "CP NVL/SP": mat, "CP NC/SP": labor, "CP SXC/SP": oh, "Giá thành/SP": unit,
                     "Tổng giá thành": unit * l["Số Lượng"], "Giá bán VND/SP": sell, "Lãi gộp/SP": sell - unit,
                     "Biên LN gộp": (sell - unit) / sell if sell else 0.0})
+    # SL sản phẩm đi qua từng công đoạn (để trình bày TK 622/627 theo công đoạn)
+    stage_qty = {s: float(sum(l["Số Lượng"] for l in so_lines
+                              if s in fg_stages.get(l["Mã Sản Phẩm ERP"], rate_of))) for s in rate_of}
     tk621 = float(mrp["Thành tiền (VND)"].sum()) if len(mrp) else 0.0
-    tk622 = total_qty * labor_sum
-    tk627 = total_qty * oh_sum
     revenue = float(sum(l["Số Lượng"] * l["Giá Bán FOB ($USD)"] for l in so_lines)) * er
     cogs = tk621 + tk622 + tk627
     gp = revenue - cogs
@@ -1201,7 +1315,7 @@ def compute_financials(res, so_df, stage_rates, P):
           (f"Thuế TNDN ({P['tax']:g}%)", tax), ("Lợi nhuận thuần (NPAT)", npat)]
     return {"sku": pd.DataFrame(sku), "tk621": tk621, "tk622": tk622, "tk627": tk627, "revenue": revenue,
             "cogs": cogs, "gp": gp, "opex": opex, "ebit": ebit, "tax": tax, "npat": npat, "total_qty": total_qty,
-            "pl": pd.DataFrame(pl, columns=["Chỉ tiêu", "Giá trị (VND)"]), "labor_sum": labor_sum, "oh_sum": oh_sum}
+            "pl": pd.DataFrame(pl, columns=["Chỉ tiêu", "Giá trị (VND)"]), "stage_qty": stage_qty}
 
 
 # =============================================================================
@@ -1350,6 +1464,10 @@ def build_master_excel(res, fin, so_df, stage_rates, P):
     R = res["R"]
     st_rows = stage_rates
     nst = len(st_rows)
+    all_st = [row["stage"] for row in st_rows]
+
+    def fg_st(j):  # công đoạn mà FG của dòng SO thứ j đi qua
+        return res.get("fg_stages", {}).get(so[j]["Mã Sản Phẩm ERP"], all_st)
     tot2 = 9 + nso
     tot22 = 9 + nst  # dòng tổng của Sheet 22/23
     TOTAL_QTY = f"{q(2)}$G${tot2}"
@@ -1698,8 +1816,10 @@ def build_master_excel(res, fin, so_df, stage_rates, P):
         put(ws, r, 3, f"={q(2)}D{r}")
         put(ws, r, 4, f"={q(2)}G{r}", F_INT)
         put(ws, r, 5, f"=SUMPRODUCT({q(4)}{col}$9:{col}${rm_last},{q(8)}$H$9:$H${rm_last})" if nrm else "=0", F_INT)
-        put(ws, r, 6, f"={q(22)}$C${tot22}", F_INT)
-        put(ws, r, 7, f"={q(23)}$C${tot22}", F_INT)
+        # CP NC / SXC per SP = Σ đơn giá các công đoạn mà FG này đi qua (liên kết sống Sheet 22/23)
+        st_idx = [s for s, row in enumerate(st_rows) if row["stage"] in fg_st(j)]
+        for c_, k_ in ((6, 22), (7, 23)):
+            put(ws, r, c_, "=" + ("+".join(f"{q(k_)}$C${9 + s}" for s in st_idx) if st_idx else "0"), F_INT)
         put(ws, r, 8, f"=E{r}+F{r}+G{r}", F_INT)
         put(ws, r, 9, f"=D{r}*H{r}", F_INT)
         put(ws, r, 10, f"={q(2)}H{r}*{ER}", F_INT)
@@ -1727,14 +1847,15 @@ def build_master_excel(res, fin, so_df, stage_rates, P):
 
     # ---------------- 22 & 23. TK 622 / TK 627 ----------------
     for key, field, label in ((22, "labor", "Đơn giá nhân công / SP (VND)"), (23, "oh", "Đơn giá SXC / SP (VND)")):
-        ws = X.sheet(key, ["STT", "Công đoạn", label, "Tổng SL SO", "Thành tiền (VND)"], [6, 26, 22, 14, 20],
-                     subtitle=f"TK {'622' if key == 22 else '627'} = Σ_Stage [ Tổng SL SO × Đơn giá công đoạn ]")
+        ws = X.sheet(key, ["STT", "Công đoạn", label, "SL SP qua công đoạn", "Thành tiền (VND)"], [6, 26, 22, 16, 20],
+                     subtitle=f"TK {'622' if key == 22 else '627'} = Σ_Stage [ SL các FG có công đoạn × Đơn giá công đoạn ]")
         for s, row in enumerate(st_rows):
             r = 9 + s
             put(ws, r, 1, s + 1)
             put(ws, r, 2, row["stage"])
             put(ws, r, 3, row[field], F_INT, kind="in")
-            put(ws, r, 4, f"={TOTAL_QTY}", F_INT)
+            terms = [f"{q(2)}$G${9 + j}" for j in range(nso) if row["stage"] in fg_st(j)]
+            put(ws, r, 4, "=" + ("+".join(terms) if terms else "0"), F_INT)
             put(ws, r, 5, f"=C{r}*D{r}", F_INT)
         total_row(X, ws, tot22, 5, 2, "TỔNG CỘNG", {3: F_INT, 5: F_INT})
 
@@ -1747,8 +1868,8 @@ def build_master_excel(res, fin, so_df, stage_rates, P):
     lines = [
         ("Doanh thu thuần", "Tổng SL × FOB × Tỷ giá (B6)", f"={REVENUE}"),
         ("Chi phí NVL trực tiếp – TK 621", "Σ Q_MRP × Đơn giá", f"={q(21)}$G${tot21}"),
-        ("Chi phí nhân công trực tiếp – TK 622", "Σ Tổng SL × Đơn giá NC", f"={q(22)}$E${tot22}"),
-        ("Chi phí sản xuất chung – TK 627", "Σ Tổng SL × Đơn giá SXC", f"={q(23)}$E${tot22}"),
+        ("Chi phí nhân công trực tiếp – TK 622", "Σ SL FG × Đơn giá NC các công đoạn của FG", f"={q(22)}$E${tot22}"),
+        ("Chi phí sản xuất chung – TK 627", "Σ SL FG × Đơn giá SXC các công đoạn của FG", f"={q(23)}$E${tot22}"),
         ("Tổng giá vốn hàng bán (COGS)", "TK 621 + TK 622 + TK 627", "=D10+D11+D12"),
         ("Lợi nhuận gộp (Gross Profit)", "Doanh thu – COGS", "=D9-D13"),
         ("Chi phí QL & BH (OPEX)", "Doanh thu × % SG&A", "=D9*$D$5"),
@@ -1970,14 +2091,17 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
     with up1:
         so_file = st.file_uploader("1. SO (BẮT BUỘC)", type=["xlsx", "xlsm", "csv"], key=f"up_so_{gen}")
     with up2:
-        bom_file = st.file_uploader("2. BOM (BẮT BUỘC)", type=["xlsx", "xlsm", "csv"], key=f"up_bom_{gen}")
+        bom_files = st.file_uploader("2. BOM (BẮT BUỘC – chọn được nhiều file)", type=["xlsx", "xlsm", "csv"],
+                                     key=f"up_bom_{gen}", accept_multiple_files=True,
+                                     help="Mỗi file BOM ứng với 1 (hoặc nhiều) thành phẩm trong SO. "
+                                          "Chọn cùng lúc nhiều file hoặc kéo thả thêm.")
     with up3:
         po_file = st.file_uploader("3. PO (TÙY CHỌN)", type=["xlsx", "xlsm", "csv"], key=f"up_po_{gen}")
     with b1:
         st.markdown('<div class="btn-spacer"></div>', unsafe_allow_html=True)
         with st.container(key="act_btns"):
             btn_calc = st.button("🚀 TÍNH TOÁN MRP", type="primary", width="stretch",
-                                 disabled=not (so_file and bom_file),
+                                 disabled=not (so_file and bom_files),
                                  help="Chỉ khi nhấn nút này hệ thống mới đọc file, rã BOM, tính MRP và giá thành.")
             btn_reset = st.button("🗑️ XÓA DỮ LIỆU", width="stretch",
                                   help="Xóa toàn bộ kết quả đã tính và các tệp đã nạp, quay về trạng thái chờ.")
@@ -2025,14 +2149,16 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
 
     # ---------------- Nút TÍNH TOÁN MRP: đọc file 1 lần, lưu vào session_state ----------------
     cur_sig = None
-    if so_file and bom_file:
-        cur_sig = (file_hash(so_file.getvalue()), file_hash(bom_file.getvalue()),
+    if so_file and bom_files:
+        bom_sig = file_hash("|".join(f"{f.name}:{file_hash(f.getvalue())}" for f in bom_files).encode())
+        cur_sig = (file_hash(so_file.getvalue()), bom_sig,
                    file_hash(po_file.getvalue()) if po_file else None)
     if btn_calc and cur_sig:
         st.session_state.pop("calc", None)
         try:
             so_df, so_warn, so_info = parse_so(so_file.getvalue(), so_file.name)
-            bom_df, stage_cols, sheet_ctx, bom_infos, bom_warn = parse_bom(bom_file.getvalue(), bom_file.name)
+            bom_df, stage_cols, sheet_ctx, bom_infos, bom_warn = parse_bom_multi(
+                [(f.getvalue(), f.name) for f in bom_files])
         except Exception as e:
             st.error(f"❌ Lỗi đọc file: {e}")
             st.stop()
@@ -2107,6 +2233,12 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
         for fg_code in exc.codes:
             st.error(f"Lỗi Dữ Liệu Chủ: Mã thành phẩm '{fg_code}' trong file Đơn hàng bán (SO) không tồn tại trong file BOM Kỹ thuật. Vui lòng kiểm tra và đồng bộ lại mã!")
         st.stop()
+    except DuplicateFGError as exc:
+        for fg_code, files in exc.dup.items():
+            st.error(f"Lỗi trùng BOM: Thành phẩm '{fg_code}' có trong {len(files)} file BOM: "
+                     + ", ".join(f"'{f}'" for f in files) + ". Vui lòng chỉ giữ 1 file cho mỗi thành phẩm "
+                     "(tránh nhân đôi nhu cầu NVL) rồi tính lại.")
+        st.stop()
     used = res["used_stages"]
     rate_map = {r["Công đoạn"]: r for r in rate_ed.to_dict("records")}
     stage_rates = [{"stage": s, "labor": to_float(rate_map.get(s, {}).get("Nhân công VND/SP"), 0),
@@ -2147,6 +2279,10 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
         if len(mrp):
             n_top = {"Top 5": 5, "Top 10": 10, "Top 25": 25}.get(top_sel, len(mrp))
             show_df(mrp.sort_values("Thành tiền (VND)", ascending=False).head(n_top), MRP_FMT, height=300)
+        # Cảnh báo quan trọng (định mức mã dùng chung lệch nhau giữa các BOM, file BOM thừa) luôn hiển thị
+        for w in res["warnings"]:
+            if w.startswith("⚠️"):
+                st.warning(w)
         # Ẩn danh sách cảnh báo dữ liệu để giữ Dashboard gọn (mảng all_warn vẫn được tính ở backend)
         # if all_warn:
         #     with st.expander(f"⚠️ Cảnh báo dữ liệu ({len(all_warn)})"):
@@ -2166,6 +2302,15 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
                            "Thành tiền ($USD)": "{:,.2f}", "Thành tiền (VND)": "{:,.0f}"}, total=True, height=340)
             with st.expander("Ánh xạ cột (Smart Header Parser)"):
                 st.json(so_info["mapping"])
+            st.markdown("##### 🔗 Đối chiếu SO ↔ BOM")
+            fs = res["fg_source"]
+            map_df = pd.DataFrame([{
+                "Dòng SO": j + 1, "Mã FG": l["Mã Sản Phẩm ERP"], "Tên TP": l["Tên Thành Phẩm"], "Số lượng": l["Số Lượng"],
+                "File BOM": ", ".join(dict.fromkeys(source_file(s) or s for s in fs.get(l["Mã Sản Phẩm ERP"], []))),
+                "Công đoạn": " → ".join(res["fg_stages"].get(l["Mã Sản Phẩm ERP"], [])),
+                "Trạng thái": "✅ Khớp" if fs.get(l["Mã Sản Phẩm ERP"]) else "⚠️ Không thấy dòng FG trong BOM",
+            } for j, l in enumerate(res["so_lines"])])
+            st.dataframe(map_df, hide_index=True, width="stretch", column_config={"Số lượng": NUMCFG(format="localized")})
         with t2:
             if po_df is None:
                 st.info("Chưa nạp file PO – kịch bản 2 tệp. Đơn giá NVL = 0đ, trừ khi nhập giá tại Live BOM Editor.")
@@ -2260,11 +2405,15 @@ white-space:nowrap !important;line-height:1.2 !important;margin-bottom:.25rem !i
         for tab, field, total, label in ((t3, "labor", fin["tk622"], "TK 622"), (t4, "oh", fin["tk627"], "TK 627")):
             with tab:
                 st.metric(f"Tổng {label}", f"{total:,.0f} VND")
-                d = pd.DataFrame([{"Công đoạn": r["stage"], "Đơn giá / SP": r[field], "Tổng SL SO": fin["total_qty"],
-                                   "Thành tiền (VND)": r[field] * fin["total_qty"]} for r in stage_rates],
-                                 columns=["Công đoạn", "Đơn giá / SP", "Tổng SL SO", "Thành tiền (VND)"])
+                st.caption("Mỗi công đoạn chỉ tính cho số lượng của các thành phẩm thực sự đi qua công đoạn đó.")
+                sq = fin["stage_qty"]
+                d = pd.DataFrame([{"Công đoạn": r["stage"], "Đơn giá / SP": r[field],
+                                   "SL SP qua công đoạn": sq.get(r["stage"], 0.0),
+                                   "Thành tiền (VND)": r[field] * sq.get(r["stage"], 0.0)} for r in stage_rates],
+                                 columns=["Công đoạn", "Đơn giá / SP", "SL SP qua công đoạn", "Thành tiền (VND)"])
                 d = with_total(d, "Công đoạn", ["Đơn giá / SP", "Thành tiền (VND)"])
-                show_df(d, {"Đơn giá / SP": "{:,.0f}", "Tổng SL SO": "{:,.0f}", "Thành tiền (VND)": "{:,.0f}"}, total=True)
+                show_df(d, {"Đơn giá / SP": "{:,.0f}", "SL SP qua công đoạn": "{:,.0f}", "Thành tiền (VND)": "{:,.0f}"},
+                        total=True)
                 if not stage_rates:
                     st.info("BOM chưa đánh dấu công đoạn nào.")
         with t5:
