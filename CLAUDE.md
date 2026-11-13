@@ -1,6 +1,6 @@
 # CLAUDE.md – METALIC ERP COSTING & MRP AUTOMATION PORTAL
 
-> Cập nhật lần cuối: 2026-11-11. Đọc file này trước khi sửa `app.py`.
+> Cập nhật lần cuối: 2026-11-13. Đọc file này trước khi sửa `app.py`.
 > Đặc tả gốc: `PRD_SPEC.md` (nguồn sự thật cho công thức và danh sách sheet).
 
 ## 1. Bối cảnh dự án
@@ -50,6 +50,9 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
 - **Cây cha–con:** dựng theo thứ tự dòng + cột `Cấp`, dùng stack (không dựa vào tiền tố chuỗi MỤC, vì Excel làm mất "1.10" → 1.1).
   - Cách tính `Cấp`: MỤC dạng chấm `1.1.1` → số phần; MỤC chữ / La Mã → 0 (nhóm); MỤC trống khi file có dạng chấm → cấp số gần nhất + 1. Không có MỤC dạng chấm → dùng khoảng lùi đầu dòng (`alignment.indent`, dấu cách).
 - **Ghép FG giữa SO và BOM** (`match_fg`): khớp chặt chẽ 1-1 theo Mã ERP hoặc Mã KH (sau `ncode`). Nếu sai lệch, ném lỗi `FGMismatchError` hiển thị trên giao diện Streamlit (`st.error`) và dừng ứng dụng (`st.stop`). Không còn khớp theo tiền tố, cột `Mã TP`, tên sheet hay gán cưỡng bức.
+- **Quy ước SỐ LƯỢNG = tổng số chiếc trên 1 thành phẩm** (cách kỹ thuật Metalic nhập; người dùng duyệt 2026-11-13). Cột TỔNG KL của kỹ thuật = `S × T`, không nhân SL cụm cha, và dòng TOTAL = `SUM(U)`. Ngay sau khi dựng cây, `run_engine` quy về SL so với cha: `SL dòng ÷ SL cụm cha gần nhất`. Cha là dòng gốc FG (tập `top` từ `resolve`) → chia 1. Chỉ đổi kết quả ở dòng cấp ≥ 3 nằm trong cụm SL > 1. Mã cụm trùng mã một FG khác (GSS: `102504` vừa là cụm SL 2 trong FG `101142`, vừa là FG số 8) vẫn được chia như cụm. Không có lựa chọn chuyển qua lại, không có cảnh báo chia không hết.
+  - Kiểm chứng trên file GSS PO#11 (`C:\Users\MyPC\Downloads\zalo_file\BOM _ GSS _ PO#11 Pro Trailers only - All Parts List _ Rev.0.xlsx`, 12 FG, SO = 1 mỗi FG): kg từng FG = SUM(TỔNG KL) của kỹ thuật ở 11/12 FG. FG `104720` lệch 0.073 kg do mã `101125` có 2 KL (0.1165 / 0.08), app dùng lần đầu và đã cảnh báo. Dòng 58–60 = 2.56 / 2.02 / 0.30 kg khi S = 2 (bản trong Downloads ghi S = 1).
+  - Cannon 104437-940 theo quy ước này: thép tấm mạ kẽm 1.52 = 52.33 kg/SP (trước đây app tính 125.66).
 - **Phân loại dòng lá:**
   - Mã bắt đầu bằng tiền tố NVL (mặc định `R-`, đổi ở Sidebar) → RM, định mức = SL × (KL kg nếu > 0, ngược lại 1).
   - Dòng có Mã NVL / KL > 0 / nhận diện được hình dạng thép → chi tiết SG + một con RM.
@@ -84,6 +87,8 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
 - `tests/` – script kiểm thử, chạy bằng `python <file>` **từ trong thư mục `tests/`**:
   - `make_samples.py` – sinh `sample_so/bom/po.xlsx` (BOM tiêu đề 2 tầng, ô gộp, nút dùng chung, sheet ghép FG theo ngữ cảnh) và bộ tách file: `sample_bom_table.xlsx`, `sample_bom_chair.xlsx`, `sample_bom_chair_diff.xlsx` (BAS-01 KL 0.2 ≠ 0.157), `sample_bom_extra.xlsx` (FG không có trong SO).
   - `test_multi_bom.py` – nhiều BOM: tách = gộp, trùng FG → lỗi, mã dùng chung lệch → cảnh báo, file thừa → cảnh báo, TK 622/627 theo FG, công thức Excel 20/22.
+  - `test_qty_per_fg.py` – quy ước SL tổng theo FG: cụm SL 2 / con SL 2 → 2 chiếc/FG; cây 4 cấp; cụm SL 1; bulong trong cụm.
+  - `test_indent.py` không có assert; dữ liệu tự dựng theo kiểu cũ (khung SL 2, con SL 4), nên từ 2026-11-13 kết quả in ra là 31.6 / 37.7 kg (trước 63.2 / 75.4). Đây là kết quả đúng theo quy ước mới.
   - `test_engine.py` – chạy parser + engine + xuất `master.xlsx` trên dữ liệu mẫu (`--nopo` = kịch bản 2 tệp).
   - `test_indent.py` – SO dạng CSV + BOM phân cấp bằng khoảng lùi đầu dòng.
   - `diag_savic.py` – chẩn đoán trên file Savic thật (`-e` để in cạnh BOM ERP và P&L).
@@ -150,7 +155,7 @@ Các quy tắc khác:
 
 ## 7. Lưu ý khi sửa code
 
-- Sau mọi thay đổi parser/engine, chạy lại tối thiểu: `tests/make_samples.py`, `tests/test_engine.py` (862.50 / 12,540), `tests/test_multi_bom.py`, `tests/diag_savic.py` (tổng 30,896.59) và `tests/ui_test.py` (0 exception).
+- Sau mọi thay đổi parser/engine, chạy lại tối thiểu: `tests/make_samples.py`, `tests/test_engine.py` (862.50 / 12,540), `tests/test_multi_bom.py`, `tests/test_qty_per_fg.py`, `tests/diag_savic.py` (tổng 30,896.59) và `tests/ui_test.py` (0 exception).
 - Khi thêm regex vào `*_SPEC`: thứ tự field = thứ tự ưu tiên. Mỗi cột chỉ được gán cho 1 field. Field có hậu tố `#` (ví dụ `"Mã Sản Phẩm ERP#"`) là phương án dự phòng chạy sau.
 - `norm("Mã")` và `norm("Mạ")` đều thành `"ma"`. Đừng nới lỏng `STAGE_EXCL`.
 - Sửa nội dung PowerShell bằng `.Replace()` với chuỗi `@'...'@`: `` `n `` **không** được mở rộng trong chuỗi nháy đơn (đã từng làm mất một dòng regex). Nên dùng công cụ Edit.

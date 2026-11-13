@@ -962,7 +962,7 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
     for rec in records:
         by_sheet.setdefault(rec["Sheet"], []).append(rec)
 
-    trees = {}
+    trees, parents = {}, {}
     for sh, rows in by_sheet.items():
         parent, children, stack = [None] * len(rows), [[] for _ in rows], []
         depth = [int(to_float(_val(r, "Cấp"), 1)) for r in rows]
@@ -974,6 +974,7 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
                 children[parent[i]].append(i)
             stack.append(i)
         trees[sh] = (rows, children, [i for i in range(len(rows)) if parent[i] is None])
+        parents[sh] = parent
 
     def row_match(r):
         return match_fg(_val(r, "Mã chi tiết", "")) or None
@@ -1115,6 +1116,20 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
                 continue
             out.append((None, i, False))
         return out
+
+    # ---- Quy ước SỐ LƯỢNG của kỹ thuật: SL mỗi dòng = TỔNG số chiếc trên 1 thành phẩm (đã nhân sẵn SL cụm) ----
+    # Quy về SL so với cụm cha: SL dòng ÷ SL cụm cha gần nhất. Cha là dòng FG (gốc đã nhận diện) → chia 1 (không đổi).
+    # VD cụm 102504 SL 2, tấm con SL 2 → 2 ÷ 2 = 1 tấm/cụm → nhu cầu = 2 × 1 × 1.28 = 2.56 kg (= cột TỔNG KL).
+    # Chỉ dòng FG thật (resolve) mới chia 1: mã cụm trùng mã một FG khác (VD 102504) vẫn là cụm trong FG chứa nó.
+    for sh, (rows, children, roots) in trees.items():
+        parent = parents[sh]
+        top = {i for _, i, _ in resolve(rows, children, roots)}  # dòng gốc của từng FG / cụm gốc
+        orig = [to_float(_val(r, "SL/Cha"), 0) for r in rows]
+        for i, r in enumerate(rows):
+            p = parent[i]
+            if p is None or p in top or orig[i] <= 0 or orig[p] <= 0 or orig[p] == 1:
+                continue
+            r["SL/Cha"] = orig[i] / orig[p]
 
     fg_files = defaultdict(list)  # FG (khớp SO) → các file BOM chứa nó
     files_with_fg = set()
