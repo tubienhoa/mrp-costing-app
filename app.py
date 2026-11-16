@@ -869,6 +869,15 @@ class DuplicateFGError(Exception):
 
 
 FILE_SEP = " › "  # nhãn nguồn khi nạp nhiều file BOM: "<tên file> › <tên sheet>"
+# Mã dùng chung có định mức khác nhau giữa các FG → rã riêng dưới mã nội bộ "<mã>§<n>" (kể cả BTP "<mã>§<n>.BTP_x").
+# Hậu tố chỉ dùng bên trong engine; mọi chỗ hiển thị / Excel dùng show_code() → mã gốc + cột Ghi chú.
+VAR_SEP = "§"
+_VAR_RE = re.compile(re.escape(VAR_SEP) + r"\d+")
+
+
+def show_code(code):
+    """Mã hiển thị (bỏ hậu tố biến thể định mức nội bộ)."""
+    return _VAR_RE.sub("", str(code))
 
 
 def source_file(sheet_label):
@@ -1010,6 +1019,33 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
                       for c in children[i])
         return repr((own, kids))
 
+    variants = {}  # mã gốc → [(chữ ký định mức, mã nội bộ)] – lần đầu = chính mã gốc
+
+    def variant_id(code, rows, children, i):
+        """Mã dùng chung (nhiều FG / nhiều chỗ) nhưng định mức khác lần rã đầu → mã nội bộ riêng để tính đúng từng chỗ.
+        Định mức giống nhau → dùng chung như cũ. Mua hàng vẫn cộng theo mã NVL (RM không bao giờ tách biến thể)."""
+        sig = None
+        if match_fg(code):
+            # Cụm lồng bên trong mang mã trùng 1 thành phẩm của SO: luôn rã riêng, để dòng FG đó giữ đúng định mức của nó
+            sig = struct_sig(rows, children, i)
+            lst = variants.setdefault(code, [])
+            for s, vid in lst:
+                if s == sig:
+                    return vid
+            vid = f"{code}{VAR_SEP}{len(lst) + 1}"
+            lst.append((sig, vid))
+            return vid
+        if code not in expanded or code not in first_sig:
+            return code
+        sig = struct_sig(rows, children, i)
+        lst = variants.setdefault(code, [(first_sig[code][0], code)])
+        for s, vid in lst:
+            if s == sig:
+                return vid
+        vid = f"{code}{VAR_SEP}{len(lst) + 1}"
+        lst.append((sig, vid))
+        return vid
+
     def process_inside(sh, rows, children, i, code, occ, scrap):
         if code in expanded and expanded[code] != occ:
             # nút dùng chung (DAG) – cấu trúc con đã được rã ở lần xuất hiện đầu tiên; cảnh báo nếu định mức khác nhau
@@ -1099,6 +1135,7 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
             add_edge(parent_code, rmc, qty * (kg if kg > 0 else 1.0), scrap, parent_occ)
             return
         code = code or f"{parent_code}-{_val(r, 'MỤC', '') or i + 1}"
+        code = variant_id(code, rows, children, i)
         reg(code, "SG", name=desc or code, uom=_val(r, "ĐVT", "") or "Cái")
         add_edge(parent_code, code, qty, 0.0 if fabricated else scrap, parent_occ)
         process_inside(sh, rows, children, i, code, (sh, i), scrap)
@@ -1223,6 +1260,27 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
             sts.update(nodes[c].get("cots_stages", ()))
         fg_stages[fg] = [s for s in stage_order if s in sts]
 
+    # ---- Ghi chú biến thể định mức: cùng mã hiển thị nhưng nhiều định mức → ghi rõ dùng trong FG nào ----
+    by_disp = defaultdict(list)
+    for c in nodes:
+        by_disp[show_code(c)].append(c)
+    node_note, variant_codes = {}, []
+    for d, ids in by_disp.items():
+        if len(ids) < 2:
+            continue
+        owner = d.split(".BTP_")[0]
+        # Nhóm theo chữ ký định mức của mã sở hữu (BTP đi theo mã cụm của nó); định mức giống nhau → không ghi chú
+        sig_of = {c: (first_sig.get(c.split(".BTP_")[0]) or (c,))[0] for c in ids}
+        uniq_sigs = list(dict.fromkeys(sig_of[c] for c in sorted(ids, key=lambda x: (VAR_SEP in x, x))))
+        if len(uniq_sigs) < 2:
+            continue
+        if owner == d:
+            variant_codes.append(d)
+        for c in ids:
+            fgs = [fg for fg in fg_cum if fg_cum[fg].get(c, 0) > 0]
+            node_note[c] = (f"Mã {owner} có {len(uniq_sigs)} định mức khác nhau – định mức "
+                            f"{uniq_sigs.index(sig_of[c]) + 1} dùng trong FG: {', '.join(fgs) or '(không có trong SO)'}")
+
     rm_codes = [c for c, n in nodes.items() if n["type"] == "RM"]
     rm_used = [c for c in rm_codes if any(fg_cum[l["Mã Sản Phẩm ERP"]].get(c, 0) > 0 for l in so_lines)]
     R = [[fg_cum[l["Mã Sản Phẩm ERP"]].get(c, 0.0) for l in so_lines] for c in rm_used]
@@ -1287,7 +1345,8 @@ def run_engine(bom_df, stage_cols, sheet_ctx, so_df, po_df, P):
     return {"nodes": nodes, "edges": edges, "children": ch, "fg_cum": fg_cum, "so_lines": so_lines,
             "rm_used": rm_used, "R": R, "mrp_df": mrp_df, "wip": wip, "warnings": W,
             "used_stages": [s for s in stage_order if s in used_stages], "fg_stages": fg_stages,
-            "fg_source": {fg: fg_files.get(fg, []) for fg in fg_cum}}
+            "fg_source": {fg: fg_files.get(fg, []) for fg in fg_cum},
+            "node_note": node_note, "variant_codes": variant_codes}
 
 
 def compute_financials(res, so_df, stage_rates, P):
@@ -1600,7 +1659,7 @@ def build_master_excel(res, fin, so_df, stage_rates, P):
         put(ws, r, 1, k + 1)
         put(ws, r, 2, f"={q(3)}B{rj}")
         put(ws, r, 3, f"={q(2)}C{rj}")
-        put(ws, r, 4, w["code"])
+        put(ws, r, 4, show_code(w["code"]))
         put(ws, r, 5, w["name"])
         put(ws, r, 6, w["stage"] or ("Lắp ráp chi tiết" if w["type"] == "SG" else ""))
         put(ws, r, 7, w["rate"], F_RATE, kind="norm")
@@ -1718,14 +1777,18 @@ def build_master_excel(res, fin, so_df, stage_rates, P):
     # ---------------- 12. WIP ----------------
     ws = X.sheet(12, ["STT", "Mã BTP / Chi tiết", "Tên", "Công đoạn", "SL kế hoạch", "SL hoàn thành", "SL dở dang",
                       "% hoàn thành"], [6, 34, 36, 14, 14, 14, 14, 12])
-    uniq = list(dict.fromkeys(w["code"] for w in wip))
+    # Gộp theo mã hiển thị: các định mức riêng của cùng 1 mã là cùng 1 BTP/chi tiết khi theo dõi WIP
+    first_id = {}
+    for w in wip:
+        first_id.setdefault(show_code(w["code"]), w["code"])
+    uniq = list(first_id)
     nodes = res["nodes"]
     for k, code in enumerate(uniq):
         r = 9 + k
         put(ws, r, 1, k + 1)
         put(ws, r, 2, code)
-        put(ws, r, 3, nodes[code]["name"])
-        put(ws, r, 4, nodes[code]["stage"])
+        put(ws, r, 3, nodes[first_id[code]]["name"])
+        put(ws, r, 4, nodes[first_id[code]]["stage"])
         put(ws, r, 5, f"=SUMIF({q(5)}$D$9:$D${wip_last},B{r},{q(5)}$H$9:$H${wip_last})", F_NUM)
         put(ws, r, 6, 0, F_NUM, kind="in")
         put(ws, r, 7, f"=E{r}-F{r}", F_NUM)
@@ -1915,15 +1978,18 @@ def build_master_excel(res, fin, so_df, stage_rates, P):
 
     # ---------------- 25. BOM ERP đa cấp ----------------
     ws = X.sheet(25, ["STT", "Mã cha", "Loại cha", "Mã con", "Tên con", "Loại con", "ĐVT con", "Định mức",
-                      "Hao hụt (%)", "Định mức gồm hao hụt", "Công đoạn"], [6, 30, 10, 34, 36, 10, 8, 14, 10, 16, 14],
+                      "Hao hụt (%)", "Định mức gồm hao hụt", "Công đoạn", "Ghi chú"],
+                 [6, 30, 10, 34, 36, 10, 8, 14, 10, 16, 14, 60],
                  subtitle="Rate(Parent, Child) × (1 + Scrap/100) – cấu trúc FG → SG → BTP → RM")
+    note = res.get("node_note", {})
     for k, ((p, c), e) in enumerate(res["edges"].items()):
         r = 9 + k
         scrap = (e["eff"] / e["rate"] - 1) * 100 if e["rate"] else 0
         put(ws, r, 1, k + 1)
-        put(ws, r, 2, p)
+        put(ws, r, 2, show_code(p))
         put(ws, r, 3, nodes[p]["type"])
-        put(ws, r, 4, c)
+        put(ws, r, 4, show_code(c))
+        put(ws, r, 12, note.get(p) or note.get(c) or "")
         put(ws, r, 5, nodes[c]["name"])
         put(ws, r, 6, nodes[c]["type"])
         put(ws, r, 7, nodes[c]["uom"])
@@ -2046,9 +2112,9 @@ def render_tree(res, fg, max_rows=3000):
         if len(out) >= max_rows:
             return
         node = nodes.get(n, {"name": "", "type": "", "uom": ""})
-        out.append({"Cấp": d, "Cây cấu trúc": ("　" * d) + ("└─ " if d else "") + n, "Tên": node["name"],
+        out.append({"Cấp": d, "Cây cấu trúc": ("　" * d) + ("└─ " if d else "") + show_code(n), "Tên": node["name"],
                     "Loại": node["type"], "ĐVT": node["uom"], "Định mức cạnh (gồm HH)": rate,
-                    "R_cum / 1 FG": cumr})
+                    "R_cum / 1 FG": cumr, "Ghi chú": res.get("node_note", {}).get(n, "")})
         for c, r in ch.get(n, []):
             if c not in path:
                 go(c, d + 1, r, cumr * r, path | {c})
@@ -2317,7 +2383,7 @@ border-top:1px solid rgba(128,128,128,.22);padding-top:.5rem}
         c = st.columns(4)
         c[0].metric("Dòng SO / Tổng SL", f"{len(so_df)} / {fin['total_qty']:,.0f}")
         c[1].metric("Mã NVL thô (RM)", f"{len(mrp)}")
-        c[2].metric("Mã BTP sinh tự động", f"{sum(1 for n in nodes.values() if n['type'] == 'BTP')}")
+        c[2].metric("Mã BTP sinh tự động", f"{len({show_code(k) for k, n in nodes.items() if n['type'] == 'BTP'})}")
         c[3].metric("Cạnh BOM ERP", f"{len(res['edges'])}")
         c = st.columns(4)
         c[0].metric("Doanh thu (VND)", f"{fin['revenue']:,.0f}")
@@ -2346,6 +2412,11 @@ border-top:1px solid rgba(128,128,128,.22);padding-top:.5rem}
         for w in res["warnings"]:
             if w.startswith("⚠️"):
                 st.warning(w)
+        if res["variant_codes"]:
+            vc = res["variant_codes"]
+            st.info(f"ℹ️ {len(vc)} mã dùng chung có định mức khác nhau giữa các thành phẩm – đã tính riêng theo từng FG, "
+                    f"mua hàng cộng dồn theo mã NVL: {', '.join(vc[:10])}{' …' if len(vc) > 10 else ''}. "
+                    "Xem cột Ghi chú ở tab BOM ERP.")
         # Ẩn danh sách cảnh báo dữ liệu để giữ Dashboard gọn (mảng all_warn vẫn được tính ở backend)
         # if all_warn:
         #     with st.expander(f"⚠️ Cảnh báo dữ liệu ({len(all_warn)})"):
@@ -2400,24 +2471,29 @@ border-top:1px solid rgba(128,128,128,.22);padding-top:.5rem}
             st.dataframe(tree, hide_index=True, width="stretch", height=400,
                          column_config={"Định mức cạnh (gồm HH)": NUMCFG(format="%.6g"), "R_cum / 1 FG": NUMCFG(format="%.6g")})
         with t2:
-            e_df = pd.DataFrame([{"Mã cha": p, "Loại cha": nodes[p]["type"], "Mã con": c, "Tên con": nodes[c]["name"],
+            note = res["node_note"]
+            e_df = pd.DataFrame([{"Mã cha": show_code(p), "Loại cha": nodes[p]["type"], "Mã con": show_code(c),
+                                  "Tên con": nodes[c]["name"],
                                   "Mã NVL / Quy cách": (f"{c} | {nodes[c]['std'] or nodes[c]['name']}"
                                                         if nodes[c]["type"] == "RM" else ""),
                                   "Tên NVL (cấp lá)": ((nodes[c]["std"] or nodes[c]["name"])
                                                        if nodes[c]["type"] == "RM" else ""),
                                   "Loại con": nodes[c]["type"], "ĐVT": nodes[c]["uom"], "Định mức": e["rate"],
                                   "Hao hụt (%)": (e["eff"] / e["rate"] - 1) * 100 if e["rate"] else 0,
-                                  "Định mức gồm HH": e["eff"]} for (p, c), e in res["edges"].items()])
+                                  "Định mức gồm HH": e["eff"], "Ghi chú": note.get(p) or note.get(c) or ""}
+                                 for (p, c), e in res["edges"].items()])
             st.dataframe(e_df, hide_index=True, width="stretch", height=400,
                          column_config={"Định mức": NUMCFG(format="%.6g"), "Hao hụt (%)": NUMCFG(format="%.2f"),
                                         "Định mức gồm HH": NUMCFG(format="%.6g")})
         with t3:
-            n_df = pd.DataFrame([{"Mã": n["code"], "Tên kỹ thuật": n["name"], "Loại": TYPE_LABEL.get(n["type"], n["type"]),
-                                  "ĐVT": n["uom"], "Tên NVL chuẩn hóa": n["std"], "Công đoạn": n["stage"]} for n in nodes.values()])
+            n_df = pd.DataFrame([{"Mã": show_code(n["code"]), "Tên kỹ thuật": n["name"],
+                                  "Loại": TYPE_LABEL.get(n["type"], n["type"]), "ĐVT": n["uom"], "Tên NVL chuẩn hóa": n["std"],
+                                  "Công đoạn": n["stage"]} for n in nodes.values()]).drop_duplicates("Mã")
             st.dataframe(n_df, hide_index=True, width="stretch", height=400)
         with t4:
-            b_df = pd.DataFrame([{"Mã BTP": n["code"], "Công đoạn": n["stage"], "Tên": n["name"]}
-                                 for n in nodes.values() if n["type"] == "BTP"], columns=["Mã BTP", "Công đoạn", "Tên"])
+            b_df = pd.DataFrame([{"Mã BTP": show_code(n["code"]), "Công đoạn": n["stage"], "Tên": n["name"]}
+                                 for n in nodes.values() if n["type"] == "BTP"],
+                                columns=["Mã BTP", "Công đoạn", "Tên"]).drop_duplicates("Mã BTP")
             st.caption("Cú pháp: {Mã_Cha}.BTP_{Tên_Công_Đoạn} – mỗi công đoạn được đánh dấu tại dòng Mã Cha sinh 1 mã WIP.")
             st.dataframe(b_df, hide_index=True, width="stretch", height=400)
 
@@ -2441,7 +2517,7 @@ border-top:1px solid rgba(128,128,128,.22);padding-top:.5rem}
             st.dataframe(mat, hide_index=True, width="stretch", height=400,
                          column_config={c: NUMCFG(format="%.6g") for c in cols})
         with t3:
-            wdf = pd.DataFrame([{"Mã TP": res["so_lines"][w["j"]]["Mã Sản Phẩm ERP"], "Mã BTP / Chi tiết": w["code"],
+            wdf = pd.DataFrame([{"Mã TP": res["so_lines"][w["j"]]["Mã Sản Phẩm ERP"], "Mã BTP / Chi tiết": show_code(w["code"]),
                                  "Tên": w["name"], "Công đoạn": w["stage"], "Định mức tích lũy": w["rate"],
                                  "SL kế hoạch": res["so_lines"][w["j"]]["Số Lượng"] * w["rate"],
                                  "Ngày bắt đầu": P["start_date"] + dt.timedelta(days=w["offset"])} for w in res["wip"]])

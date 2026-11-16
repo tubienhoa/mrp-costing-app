@@ -1,6 +1,6 @@
 # CLAUDE.md – METALIC ERP COSTING & MRP AUTOMATION PORTAL
 
-> Cập nhật lần cuối: 2026-11-13. Đọc file này trước khi sửa `app.py`.
+> Cập nhật lần cuối: 2026-11-16. Đọc file này trước khi sửa `app.py`.
 > Đặc tả gốc: `PRD_SPEC.md` (nguồn sự thật cho công thức và danh sách sheet).
 
 ## 1. Bối cảnh dự án
@@ -10,7 +10,8 @@
 - Đầu vào: **SO** (bắt buộc), **Technical BOM** (bắt buộc, **nạp được nhiều file**, thường mỗi file 1 FG), **PO** (tùy chọn); định dạng `.xlsx/.xlsm/.csv`.
   - Nhiều file BOM: `parse_bom_multi()` gọi `parse_bom` cho từng file, đổi nhãn cột `Sheet` thành `<file> › <sheet>` (`FILE_SEP`, `source_file()`) để mỗi file dựng cây riêng, hợp nhất cột công đoạn theo `slug` tên (file thiếu → 0). 1 file thì giữ nguyên hành vi cũ (nhãn chỉ là tên sheet).
   - 1 FG nằm ở ≥ 2 file → `DuplicateFGError`, UI `st.error` + `st.stop` (tránh nhân đôi nhu cầu). File không chứa FG nào của SO → cảnh báo "file thừa".
-  - Mã chi tiết dùng chung mà định mức khác nhau (KL, Mã NVL, kích thước, công đoạn, cây con – **không** so mô tả) → cảnh báo `⚠️`, dùng cấu trúc lần đầu (`struct_sig`, `first_sig` trong `run_engine`). Cảnh báo bắt đầu bằng `⚠️` luôn hiện ở tab Tổng quan.
+  - **Mã dùng chung mà định mức khác nhau** giữa các FG (KL, Mã NVL, kích thước, công đoạn, cây con – **không** so mô tả; `struct_sig`) là chuyện bình thường (người dùng duyệt 2026-11-16): **tính riêng theo từng chỗ xuất hiện**, mua hàng vẫn cộng theo mã NVL. `variant_id()` trong `process_row` cấp mã nội bộ `<mã>§<n>` (`VAR_SEP`) cho định mức khác lần rã đầu; định mức giống nhau thì dùng chung như cũ. Cụm lồng bên trong có mã trùng một FG của SO luôn được rã riêng. RM không bao giờ tách. Mọi chỗ hiển thị / Excel dùng `show_code()` để bỏ hậu tố → **mã gốc + cột "Ghi chú"** (`res["node_note"]`: "Mã X có n định mức khác nhau – định mức k dùng trong FG: …") ở tab BOM ERP (cây, cạnh) và sheet `25` (cột L). Sheet 12 / Item Master / bảng BTP gộp theo mã hiển thị. Tab Tổng quan hiện `st.info` liệt kê `res["variant_codes"]`. Không còn cảnh báo vàng cho trường hợp này (chỉ còn cho dòng FG trùng mã có cấu trúc khác). Cảnh báo bắt đầu bằng `⚠️` luôn hiện ở tab Tổng quan.
+    - Kiểm chứng STOVAX County & Stockton (4 FG × SO 100): cụm `MEC11838` có tấm SL 1 (FG MEC11888, MEC11731) và SL 2 (FG MEC11887, MEC11759) → Thép tấm 5.0 = 13,640.69 kg (trước: 12,910.80, thiếu 729.89).
   - Tab SO có bảng **Đối chiếu SO ↔ BOM** (FG → file BOM → chuỗi công đoạn).
   - Kịch bản 2 tệp: **không có PO → đơn giá NVL = 0** (nguồn giá `Chưa nạp PO (0đ)`), TK 621 = 0, trừ khi người dùng gõ giá ở BOM / Live BOM Editor.
   - Kịch bản 3 tệp: danh mục NVL lấy từ BOM làm gốc, đối chiếu sang PO để lấy đơn giá, số PO và NCC (khớp → `PO: <số PO>`; không khớp → giá BOM / Live Editor nếu có, ngược lại 0, `Chưa có giá PO (0đ)`).
@@ -51,7 +52,7 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
   - Cách tính `Cấp`: MỤC dạng chấm `1.1.1` → số phần; MỤC chữ / La Mã → 0 (nhóm); MỤC trống khi file có dạng chấm → cấp số gần nhất + 1. Không có MỤC dạng chấm → dùng khoảng lùi đầu dòng (`alignment.indent`, dấu cách).
 - **Ghép FG giữa SO và BOM** (`match_fg`): khớp chặt chẽ 1-1 theo Mã ERP hoặc Mã KH (sau `ncode`). Nếu sai lệch, ném lỗi `FGMismatchError` hiển thị trên giao diện Streamlit (`st.error`) và dừng ứng dụng (`st.stop`). Không còn khớp theo tiền tố, cột `Mã TP`, tên sheet hay gán cưỡng bức.
 - **Quy ước SỐ LƯỢNG = tổng số chiếc trên 1 thành phẩm** (cách kỹ thuật Metalic nhập; người dùng duyệt 2026-11-13). Cột TỔNG KL của kỹ thuật = `S × T`, không nhân SL cụm cha, và dòng TOTAL = `SUM(U)`. Ngay sau khi dựng cây, `run_engine` quy về SL so với cha: `SL dòng ÷ SL cụm cha gần nhất`. Cha là dòng gốc FG (tập `top` từ `resolve`) → chia 1. Chỉ đổi kết quả ở dòng cấp ≥ 3 nằm trong cụm SL > 1. Mã cụm trùng mã một FG khác (GSS: `102504` vừa là cụm SL 2 trong FG `101142`, vừa là FG số 8) vẫn được chia như cụm. Không có lựa chọn chuyển qua lại, không có cảnh báo chia không hết.
-  - Kiểm chứng trên file GSS PO#11 (`C:\Users\MyPC\Downloads\zalo_file\BOM _ GSS _ PO#11 Pro Trailers only - All Parts List _ Rev.0.xlsx`, 12 FG, SO = 1 mỗi FG): kg từng FG = SUM(TỔNG KL) của kỹ thuật ở 11/12 FG. FG `104720` lệch 0.073 kg do mã `101125` có 2 KL (0.1165 / 0.08), app dùng lần đầu và đã cảnh báo. Dòng 58–60 = 2.56 / 2.02 / 0.30 kg khi S = 2 (bản trong Downloads ghi S = 1).
+  - Kiểm chứng trên file GSS PO#11 (`C:\Users\MyPC\Downloads\zalo_file\BOM _ GSS _ PO#11 Pro Trailers only - All Parts List _ Rev.0.xlsx`, 12 FG, SO = 1 mỗi FG): kg từng FG = SUM(TỔNG KL) của kỹ thuật ở **12/12 FG** (cả bản S = 1 lẫn S = 2 ở dòng 58–60; mã `101125` có 2 KL 0.1165 / 0.08 nay được tính riêng theo từng FG). Dòng 58–60 = 2.56 / 2.02 / 0.30 kg khi S = 2 (bản trong Downloads ghi S = 1).
   - Cannon 104437-940 theo quy ước này: thép tấm mạ kẽm 1.52 = 52.33 kg/SP (trước đây app tính 125.66).
 - **Phân loại dòng lá:**
   - Mã bắt đầu bằng tiền tố NVL (mặc định `R-`, đổi ở Sidebar) → RM, định mức = SL × (KL kg nếu > 0, ngược lại 1).
@@ -86,7 +87,7 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
 - `requirements.txt` – streamlit, pandas, openpyxl.
 - `tests/` – script kiểm thử, chạy bằng `python <file>` **từ trong thư mục `tests/`**:
   - `make_samples.py` – sinh `sample_so/bom/po.xlsx` (BOM tiêu đề 2 tầng, ô gộp, nút dùng chung, sheet ghép FG theo ngữ cảnh) và bộ tách file: `sample_bom_table.xlsx`, `sample_bom_chair.xlsx`, `sample_bom_chair_diff.xlsx` (BAS-01 KL 0.2 ≠ 0.157), `sample_bom_extra.xlsx` (FG không có trong SO).
-  - `test_multi_bom.py` – nhiều BOM: tách = gộp, trùng FG → lỗi, mã dùng chung lệch → cảnh báo, file thừa → cảnh báo, TK 622/627 theo FG, công thức Excel 20/22.
+  - `test_multi_bom.py` – nhiều BOM: tách = gộp, trùng FG → lỗi, mã dùng chung lệch định mức → tính riêng theo FG + ghi chú (BAS-01: 917.75 kg), file thừa → cảnh báo, TK 622/627 theo FG, công thức Excel 20/22.
   - `test_qty_per_fg.py` – quy ước SL tổng theo FG: cụm SL 2 / con SL 2 → 2 chiếc/FG; cây 4 cấp; cụm SL 1; bulong trong cụm.
   - `test_indent.py` không có assert; dữ liệu tự dựng theo kiểu cũ (khung SL 2, con SL 4), nên từ 2026-11-13 kết quả in ra là 31.6 / 37.7 kg (trước 63.2 / 75.4). Đây là kết quả đúng theo quy ước mới.
   - `test_engine.py` – chạy parser + engine + xuất `master.xlsx` trên dữ liệu mẫu (`--nopo` = kịch bản 2 tệp).

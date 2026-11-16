@@ -43,13 +43,18 @@ except app.DuplicateFGError as e:
     assert "FG-CHAIR-02" in e.dup and len(e.dup["FG-CHAIR-02"]) == 2, e.dup
     print("2. OK – trùng FG:", e.dup)
 
-# 3. Mã dùng chung có định mức khác nhau giữa 2 file → cảnh báo, dùng file đầu
+# 3. Mã dùng chung có định mức khác nhau giữa 2 file → tính riêng theo từng FG (không cảnh báo), mua cộng theo mã NVL
 r3, _ = run(["sample_bom_table.xlsx", "sample_bom_chair_diff.xlsx"])
-w3 = [w for w in r3["warnings"] if "BAS-01" in w and "khác nhau" in w]
-assert len(w3) == 1, r3["warnings"]
-print("3. OK –", w3[0])
 r3b, _ = run(["sample_bom_table.xlsx", "sample_bom_chair.xlsx"])
-assert not [w for w in r3b["warnings"] if "khác nhau" in w], "không được cảnh báo khi cấu trúc giống nhau"
+assert not [w for w in r3["warnings"] + r3b["warnings"] if "khác nhau" in w], "không còn cảnh báo vàng"
+assert r3["variant_codes"] == ["BAS-01"] and r3b["variant_codes"] == [], (r3["variant_codes"], r3b["variant_codes"])
+bas = "RM-BAS-THEP-TAM-8.0"
+exp = mrp(r3b)[bas] + 2000 * 2 * 0.2  # ghế (SO 2000) thêm 2 BAS-01 × 0.2 kg theo đúng BOM ghế, bàn giữ 0.157 kg
+assert abs(mrp(r3)[bas] - exp) < 1e-6, (mrp(r3)[bas], exp)
+notes = {v for k, v in r3["node_note"].items() if k.startswith("BAS-01")}
+assert any("FG-TABLE-01" in n for n in notes) and any("FG-CHAIR-02" in n for n in notes), notes
+assert all("§" not in app.show_code(c) for c in r3["nodes"])
+print(f"3. OK – BAS-01 2 định mức, {bas} = {mrp(r3)[bas]:.4f} kg; ghi chú:", sorted(notes)[1])
 
 # 4. File BOM thừa (FG không có trong SO) → cảnh báo
 r4, _ = run(["sample_bom_table.xlsx", "sample_bom_chair.xlsx", "sample_bom_extra.xlsx"])

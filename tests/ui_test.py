@@ -43,7 +43,8 @@ for mode in ("0", "2", "3", "S", "M", "D"):
     assert not at.exception, f"MODE {mode} có exception"
     if mode == "M":
         ws = [w.value for w in at.warning]
-        assert any("BAS-01" in w for w in ws) and any("file thừa" in w for w in ws), ws
+        assert any("file thừa" in w for w in ws) and not any("BAS-01" in w for w in ws), ws
+        assert any("BAS-01" in i.value and "định mức khác nhau" in i.value for i in at.info), [i.value for i in at.info]
         assert not at.error, "MODE M không được có lỗi"
         print(" warnings:", [w[:90] for w in ws])
     if mode == "D":
