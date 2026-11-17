@@ -1,6 +1,6 @@
 # CLAUDE.md – METALIC ERP COSTING & MRP AUTOMATION PORTAL
 
-> Cập nhật lần cuối: 2026-11-16. Đọc file này trước khi sửa `app.py`.
+> Cập nhật lần cuối: 2026-11-17. Đọc file này trước khi sửa `app.py`.
 > Đặc tả gốc: `PRD_SPEC.md` (nguồn sự thật cho công thức và danh sách sheet).
 
 ## 1. Bối cảnh dự án
@@ -71,6 +71,15 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
 - **TK 622 / 627 theo từng FG** (lệch có chủ ý so với đặc tả, người dùng duyệt 2026-11-11): `Σ_FG SL_FG × Σ đơn giá các công đoạn mà FG đó đi qua`. `run_engine` trả `fg_stages` (công đoạn của BTP trong `fg_cum[fg]` + `cots_stages` của vật tư mua ngoài). `compute_financials` trả `stage_qty` (SL SP qua từng công đoạn). Excel: sheet 22/23 cột D = tổng `'02'!G` của các FG có công đoạn; sheet 20 cột F/G = tổng ô đơn giá sheet 22/23 của các công đoạn thuộc FG.
 - **NPAT** = `MAX(0, EBIT × (1 − %thuế))` – theo đúng đặc tả. Lỗ thì hiện 0 và có cảnh báo.
 
+### Phiếu PR đề xuất mua hàng (người dùng duyệt 2026-11-17) – chỉ ĐỌC kết quả MRP, không đổi MRP / Excel Master
+
+- Vị trí: tab **Hoạch định MRP → "📝 Đề xuất mua hàng (PR)"** (`render_pr_tab`). Người dùng nhập tay 3 cột (`PR_INPUT_COLS`): tồn kho (2), tỷ lệ contingency (%), SL PR Kỹ thuật (5). Có ô **Điền nhanh** tỷ lệ theo nhóm / tất cả. Bấm **TÍNH TOÁN PR** → bảng kết quả + nút tải `PR_de_xuat_<ngày>.xlsx`. Sửa input sau khi tính → phải bấm tính lại mới tải được.
+- `build_pr_base(res)`: dòng vật tư theo `mrp_df`, chia nhóm `PR_GROUPS` (THÉP TẤM / THÉP CÂY / VẬT TƯ MUA NGOÀI – theo tên chuẩn + ĐVT Kg). Thép quy kg → **tấm / cây** theo GHI CHÚ của BOM, **cách A**: `"AxB được N pcs/1 tấm"`, `"1 cây Lm cắt được N pcs"` → làm tròn lên **từng chi tiết**; `"1m2 được N pcs"`, chi tiết không ghi định mức, phần hao hụt còn lại → cộng dồn rồi làm tròn lên. Khổ = khổ phổ biến nhất của loại thép đó; không có thì khổ tấm phổ biến nhất trong BOM. KL/ĐVT = khổ × dày (cây: tiết diện tròn/ống/hộp × L) × KLR (mặc định 7.85). Chi tiết cùng mã sau `ncode` (VD `ME600630` / `ME 600630`) gộp trước khi làm tròn. Vật tư mua ngoài cùng tên + ĐVT khác mã (mã đóng gói riêng từng FG) gộp 1 dòng.
+- `pr_compute()` = công thức trong Excel: (3) `ROUNDUP((1)×tỷ lệ)`; (4) `MAX(0,(1)−(2)+(3))`; Chênh lệch `IF(L="","",L−K)`; **SL đặt mua `IF(L="",K,MIN(K,L))`** (chưa có PR KT thì lấy (4)); KL theo PR KT trống khi chưa có (5).
+- `build_pr_excel()`: 4 sheet `PR_de_xuat` (mẫu MTL-PR04/RE 01: đầu phiếu tự điền, nhóm, ô vàng nhập tay, công thức sống, cột "Dùng cho" để trống, Ghi chú lấy từ GHI CHÚ BOM, dòng tổng KL, 5 ô ký, in A4 ngang), `Chi_tiet_theo_model`, `Dinh_muc_cat`, `Ghi_chu`.
+- Parser đọc thêm 3 cột chỉ cho PR: `Ghi chú`, `Mác VT`, `KLR` (`BOM_EXTRA_SPEC`, dò **sau** khi đã chốt tiêu đề, chỉ trên cột chưa gán → không đổi nhận diện tiêu đề). Engine lưu `pr_part` (chi tiết → NVL, kg/chi tiết, ghi chú, kích thước, KLR), `pr_notes`, `pr_grades`, `pr_src` trên node – không tham gia tính MRP.
+- Kiểm chứng STOVAX (BOM `_SAI`, 4 FG × 100): số tấm/cây khớp phiếu mẫu ở mọi loại thép, trừ thép 5mm = 93 tấm (mẫu 89, khác do mẫu không theo một quy tắc làm tròn nhất quán; cách A được duyệt). Excel PR tính lại bằng `formulas` khớp `pr_compute` 54 dòng × 6 cột, 0 lỗi công thức.
+
 ### Excel Master (`build_master_excel`)
 
 - Thứ tự 25 sheet: 01 → 25. Sheet 25 là `25. BOM ERP Da cap`, do tôi thêm vì đặc tả chỉ liệt kê 24 sheet.
@@ -94,7 +103,7 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
   - `test_indent.py` – SO dạng CSV + BOM phân cấp bằng khoảng lùi đầu dòng.
   - `diag_savic.py` – chẩn đoán trên file Savic thật (`-e` để in cạnh BOM ERP và P&L).
   - `verify_xlsx.py`, `verify_savic.py` – tính lại công thức Excel bằng thư viện `formulas` và so với Python. Cần chạy `pip install formulas` (hoặc `--target tests/pylib`). Lỗi `#NAME?` ở `HYPERLINK` (sheet 01) là do thư viện không hỗ trợ hàm này, Excel vẫn chạy bình thường.
-  - `ui_test.py` – Streamlit `AppTest` cho các kịch bản 0 (clean slate) / 2 / 3 / S (Savic) / M (nhiều BOM + cảnh báo) / D (trùng FG → lỗi). Giả lập `st.file_uploader` (trả list khi `accept_multiple_files`).
+  - `ui_test.py` – Streamlit `AppTest` cho các kịch bản 0 (clean slate) / 2 / 3 / S (Savic) / M (nhiều BOM + cảnh báo) / D (trùng FG → lỗi); kịch bản 2 và S thử thêm tab PR (Điền nhanh → TÍNH TOÁN PR → có nút tải). Giả lập `st.file_uploader` (trả list khi `accept_multiple_files`).
   - Trên Windows chạy test với `PYTHONUTF8=1` (console cp1252 không in được tiếng Việt).
   - `verify_xlsx.py` trên mẫu báo 26 lỗi công thức: 25 `#NAME?` của `HYPERLINK` + 1 `#REF!` – **có sẵn từ `v1.0-stable`**, chưa điều tra.
   - `dump.py <file.xlsx> [maxrows]` – in giá trị, công thức, ô gộp, khoảng lùi của từng sheet. **Luôn chạy script này trước khi sửa parser cho một file mới.**

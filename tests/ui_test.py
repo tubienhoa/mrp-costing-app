@@ -47,6 +47,14 @@ for mode in ("0", "2", "3", "S", "M", "D"):
         assert any("BAS-01" in i.value and "định mức khác nhau" in i.value for i in at.info), [i.value for i in at.info]
         assert not at.error, "MODE M không được có lỗi"
         print(" warnings:", [w[:90] for w in ws])
+    if mode in ("2", "S"):  # Tab Đề xuất mua hàng (PR): điền nhanh → TÍNH TOÁN PR → có nút tải Excel PR
+        assert not [b for b in at.button if "TẢI" in b.label.upper()], "chưa tính PR đã có nút tải"
+        [b for b in at.button if "Điền nhanh" in b.label][0].click().run()
+        [b for b in at.button if "TÍNH TOÁN PR" in b.label][0].click().run()
+        assert not at.exception, [e.value for e in at.exception]
+        dls = [d for d in at.get("download_button") if "PR" in str(d.proto.label)]
+        assert dls, "không có nút tải Phiếu PR"
+        print(" PR: OK – có nút tải", dls[0].proto.label)
     if mode == "D":
         assert any("Lỗi trùng BOM" in e.value and "FG-CHAIR-02" in e.value for e in at.error), "MODE D phải báo trùng FG"
     for e in at.exception:
