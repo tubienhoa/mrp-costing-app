@@ -55,6 +55,20 @@ for mode in ("0", "2", "3", "S", "M", "D"):
         dls = [d for d in at.get("download_button") if "PR" in str(d.proto.label)]
         assert dls, "không có nút tải Phiếu PR"
         print(" PR: OK – có nút tải", dls[0].proto.label)
+        if mode == "S":  # Tối ưu cắt: đổi phương án thép tấm 8.0 + mua thêm 2 → bảng PR cập nhật, không lỗi
+            sbs = [s for s in at.selectbox if s.label == "Phương án"]
+            assert len(sbs) == 6, len(sbs)
+            sb = sbs[0]
+            other = [k for k in ("1250x2500", "1500x3000", "1500x6000") if k != sb.value][0]
+            sb.select(other).run()
+            [n for n in at.number_input if n.label == "Mua thêm"][0].set_value(2).run()
+            assert not at.exception, [e.value for e in at.exception]
+            pr = [d.value for d in at.dataframe if "Theo tối ưu (1)" in d.value.columns][0]
+            r0 = pr.iloc[0]
+            assert r0["Mua thêm"] == 2 and r0["Số lượng mua (4)"] == r0["Theo tối ưu (1)"] + r0["Contingency (3)"] + 2, r0
+            assert r0["Phương án"].startswith("Khổ " + other.replace("x", "×")), (r0["Phương án"], other)
+            assert [d for d in at.get("download_button") if "PR" in str(d.proto.label)]
+            print(" PR tối ưu cắt: OK – đổi phương án", other, "+ mua thêm 2 →", r0["Số lượng mua (4)"], r0["ĐVT"])
     if mode == "D":
         assert any("Lỗi trùng BOM" in e.value and "FG-CHAIR-02" in e.value for e in at.error), "MODE D phải báo trùng FG"
     for e in at.exception:

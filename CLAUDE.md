@@ -78,6 +78,7 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
 - `pr_compute()` = công thức trong Excel: (3) `ROUNDUP((1)×tỷ lệ)`; (4) `MAX(0,(1)−(2)+(3))`; Chênh lệch `IF(L="","",L−K)`; **SL đặt mua `IF(L="",K,MIN(K,L))`** (chưa có PR KT thì lấy (4)); KL theo PR KT trống khi chưa có (5).
 - `build_pr_excel()`: 4 sheet `PR_de_xuat` (mẫu MTL-PR04/RE 01: đầu phiếu tự điền, nhóm, ô vàng nhập tay, công thức sống, cột "Dùng cho" để trống, Ghi chú lấy từ GHI CHÚ BOM, dòng tổng KL, 5 ô ký, in A4 ngang), `Chi_tiet_theo_model`, `Dinh_muc_cat`, `Ghi_chu`.
 - Parser đọc thêm 3 cột chỉ cho PR: `Ghi chú`, `Mác VT`, `KLR` (`BOM_EXTRA_SPEC`, dò **sau** khi đã chốt tiêu đề, chỉ trên cột chưa gán → không đổi nhận diện tiêu đề). Engine lưu `pr_part` (chi tiết → NVL, kg/chi tiết, ghi chú, kích thước, KLR), `pr_notes`, `pr_grades`, `pr_src` trên node – không tham gia tính MRP.
+- **Tối ưu cắt** (nhánh `feature/pr-toi-uu-cat`, 2026-11-24): `cutting.py` chép nguyên văn từ `D:\METALIC_SMART_QUOTATION\backend\app\mrp\cutting.py` (`cut_bars`, `summarize_bars`, `pack_sheets`). `pr_part` có thêm `l` (Dài). `pr_cut_options(row, rate, cfg)`: thép có chi tiết đủ kích thước (tấm: Dày+Rộng+Dài; cây: Rộng+Dài, hộp thêm Rộng B+Dày, ống thêm Dày) → (1) = số cây/tấm theo sơ đồ cắt; contingency áp vào **số chi tiết** (`ROUNDUP(q×tỷ lệ)`) rồi tối ưu lại → (3) = u1 − u0 (ô số, không phải công thức). Chi tiết thiếu kích thước / quá khổ → cách cũ + cờ ⚠ ước lượng; không dòng chi tiết nào đủ kích thước → giữ nguyên cách cũ. Phương án: cây = từng chiều dài bật + trộn; tấm = từng khổ bật; đề xuất = không ước lượng, ít vật liệu nhất. Hao hụt % MRP **không** cộng vào số cây/tấm. Cấu hình (`PR_CUT_DEFAULT`: cây 6 m bật / 12 m tắt; khổ 1250×2500, 1500×3000, 1500×6000; mạch cưa 3, bỏ đầu cây 10, đoạn dư ≥ 500, khe tấm 5) sửa ở expander "✂️ Tối ưu cắt". `pr_effective` = số liệu sau khi chọn phương án / mua thêm; `pr_compute(rows, inputs, eff)`: (4) = (1) − (2) + (3) + mua thêm. Excel PR: 25 cột (thêm Cách cũ, Phương án, % phế, Đoạn dư, Mua thêm), sheet thứ 5 `So_do_cat` (`pr_plan_rows`). Savic (3%): tấm 8.0 cũ 35 → tối ưu 44 tấm 1500×6000; hộp 80x80x3 cũ 75 → 86 cây 6 m.
 - Kiểm chứng STOVAX (BOM `_SAI`, 4 FG × 100): số tấm/cây khớp phiếu mẫu ở mọi loại thép, trừ thép 5mm = 93 tấm (mẫu 89, khác do mẫu không theo một quy tắc làm tròn nhất quán; cách A được duyệt). Excel PR tính lại bằng `formulas` khớp `pr_compute` 54 dòng × 6 cột, 0 lỗi công thức.
 
 ### Excel Master (`build_master_excel`)
@@ -92,6 +93,7 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
 ## 3. Các file trong dự án
 
 - `app.py` – toàn bộ ứng dụng.
+- `cutting.py` – thuật toán tối ưu cắt (chỉ dùng cho phiếu PR).
 - `PRD_SPEC.md` – đặc tả gốc.
 - `requirements.txt` – streamlit, pandas, openpyxl.
 - `tests/` – script kiểm thử, chạy bằng `python <file>` **từ trong thư mục `tests/`**:
@@ -99,6 +101,8 @@ Các phần được đánh số trong comment. Số dòng thay đổi theo th�
   - `test_multi_bom.py` – nhiều BOM: tách = gộp, trùng FG → lỗi, mã dùng chung lệch định mức → tính riêng theo FG + ghi chú (BAS-01: 917.75 kg), file thừa → cảnh báo, TK 622/627 theo FG, công thức Excel 20/22.
   - `test_qty_per_fg.py` – quy ước SL tổng theo FG: cụm SL 2 / con SL 2 → 2 chiếc/FG; cây 4 cấp; cụm SL 1; bulong trong cụm.
   - `test_indent.py` không có assert; dữ liệu tự dựng theo kiểu cũ (khung SL 2, con SL 4), nên từ 2026-11-13 kết quả in ra là 31.6 / 37.7 kg (trước 63.2 / 75.4). Đây là kết quả đúng theo quy ước mới.
+  - `test_cutting.py` – bất biến thuật toán cắt (12×2,1 m → 6 cây; mạch cưa; trộn; quá dài; ngẫu nhiên cây + tấm).
+  - `test_pr_cut.py` – tối ưu cắt trong PR: contingency vào số chi tiết, cờ ước lượng, mọi chi tiết đều có trong sơ đồ, Excel PR tính lại bằng `formulas` khớp `pr_compute`, bảng so sánh Savic.
   - `test_engine.py` – chạy parser + engine + xuất `master.xlsx` trên dữ liệu mẫu (`--nopo` = kịch bản 2 tệp).
   - `test_indent.py` – SO dạng CSV + BOM phân cấp bằng khoảng lùi đầu dòng.
   - `diag_savic.py` – chẩn đoán trên file Savic thật (`-e` để in cạnh BOM ERP và P&L).
