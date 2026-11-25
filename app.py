@@ -1715,6 +1715,14 @@ def pr_cut_options(row, rate, cfg):
             return row["Cách cũ"]
         return _ceil(kg_net / unit) if unit else None
 
+    def old_info(unit, size):
+        """Cách cũ kèm khổ và KL của nó: có định mức GHI CHÚ → đếm theo khổ ghi chú; không có → quy kg theo khổ phương án."""
+        if row["ĐVT cách cũ"] in ("Tấm", "Cây"):
+            n, sz, u = row["Cách cũ"], row["Kích thước"], row["KL / ĐVT (kg)"]
+        else:
+            n, sz, u = old_units(unit), size, unit
+        return n, sz, (n * u if n is not None and u else None)
+
     opts = []
     if kind == "bar":
         kg_m = _unit_kg(grp, std, ref, (1000,))
@@ -1750,7 +1758,8 @@ def pr_cut_options(row, rate, cfg):
             o["unit"] = o["kg1"] / o["u1"] if o["u1"] else unit_max
             o["size"] = " + ".join(f"{x:g}mm" for x in s)
             o["breakdown"] = " + ".join(f"{v} cây {k / 1000:g} m" for k, v in sorted(o["cnt1"].items()))
-            o["old"] = old_units(unit_max)
+            o["kg0"] = sum(k * v for k, v in o["cnt0"].items()) / 1000 * kg_m
+            o["old"], o["old_size"], o["old_kg"] = old_info(unit_max, o["size"])
             o["cost"] = o["bought_mm"]
             opts.append(o)
     else:
@@ -1778,7 +1787,8 @@ def pr_cut_options(row, rate, cfg):
             o["kg1"] = o["u1"] * unit
             o["size"] = f"{W:g} x {Lg:g}mm"
             o["breakdown"] = f"{o['u1']} tấm {W}×{Lg}"
-            o["old"] = old_units(unit)
+            o["kg0"] = o["u0"] * unit
+            o["old"], o["old_size"], o["old_kg"] = old_info(unit, o["size"])
             o["cost"] = o["u1"] * W * Lg
             opts.append(o)
     # Đề xuất: ưu tiên phương án không phải ước lượng, rồi ít vật liệu mua nhất, rồi ít cây/tấm
@@ -1796,6 +1806,7 @@ def pr_effective(rows, cut_opts, choices=None, extras=None):
             steel = r["Nhóm"] != PR_GROUPS[2]
             out.append({"opt": None, "ĐVT": r["ĐVT"], "Kích thước": r["Kích thước"], "unit": r["KL / ĐVT (kg)"],
                         "Cách cũ": r["Cách cũ"] if steel else None, "extra": extra,
+                        "Khổ cách cũ": r["Kích thước"] if steel else "", "KL cách cũ": None, "KL tối ưu": None,
                         "Phương án": "⚠ Ước lượng – thiếu kích thước chi tiết, giữ cách cũ" if steel else "",
                         "% phế": None, "Đoạn dư dùng lại": "", "flag": steel})
             continue
@@ -1809,6 +1820,7 @@ def pr_effective(rows, cut_opts, choices=None, extras=None):
                 txt += " (quá khổ/dài hơn cây)"
         out.append({"opt": o, "ĐVT": "Tấm" if o["kind"] == "sheet" else "Cây", "Kích thước": o["size"], "unit": o["unit"],
                     "u0": o["u0"], "u1": o["u1"], "Cách cũ": o["old"], "extra": extra, "Phương án": txt,
+                    "Khổ cách cũ": o["old_size"], "KL cách cũ": o["old_kg"], "KL tối ưu": o["kg0"],
                     "% phế": o["waste_pct"],
                     "Đoạn dư dùng lại": (f"{o['remnant_n']} đoạn, {o['remnant_mm'] / 1000:,.2f} m"
                                          if o["kind"] == "bar" and o["remnant_n"] else ("0" if o["kind"] == "bar" else "")),
@@ -2590,7 +2602,13 @@ def build_pr_excel(base, inputs, res, P, calc, eff=None, cut_cfg=None):
         put(ws, r, 22, f'=IF(OR(T{r}="",Q{r}=""),"",Q{r}*T{r})', "#,##0.0")
         put(ws, r, 23, row["KL tịnh theo BOM (kg)"], "#,##0.0", fill=NORM_FILL if row["KL tịnh theo BOM (kg)"] else None)
         put(ws, r, 24, None)  # Dùng cho – để trống theo yêu cầu
-        put(ws, r, 25, "Tối ưu cắt – xem sheet So_do_cat" if opt else row["Ghi chú"], wrap=True)
+        if opt and e["KL cách cũ"] is not None:
+            note = (f"Tối ưu cắt (xem So_do_cat): (1) = {opt['u0']} {e['ĐVT'].lower()} {e['Kích thước']} = {e['KL tối ưu']:,.1f} kg. "
+                    f"Cách cũ: {e['Cách cũ']:,.0f} × {e['Khổ cách cũ']} = {e['KL cách cũ']:,.1f} kg "
+                    f"(chênh {e['KL tối ưu'] - e['KL cách cũ']:+,.1f} kg)")
+        else:
+            note = "Tối ưu cắt – xem sheet So_do_cat" if opt else row["Ghi chú"]
+        put(ws, r, 25, note, wrap=True)
         r += 1
     last_data = r - 1
     r += 1
@@ -2940,8 +2958,8 @@ def render_pr_tab(res, P, calc):
     rate = f2.number_input("Tỷ lệ (%)", min_value=0.0, max_value=100.0, value=3.0, step=0.5, key=f"pr_rate_{sig}")
     fill_click = f3.button("⚡ Điền nhanh", width="stretch", key=f"pr_fill_{sig}")
     view = pd.DataFrame([{"Nhóm": r["Nhóm"], "Mã vật tư": r["Mã vật tư"], "Tên mặt hàng và quy cách": r["Tên mặt hàng và quy cách"],
-                          "Kích thước": e["Kích thước"], "ĐVT": e["ĐVT"], "Cách cũ": e["Cách cũ"],
-                          "Số lượng (1)": e["u0"] if e["opt"] else r["Số lượng theo BOM (1)"]}
+                          "Kích thước": e["Kích thước"], "ĐVT": e["ĐVT"], "Khổ cách cũ": e["Khổ cách cũ"],
+                          "Cách cũ": e["Cách cũ"], "Số lượng (1)": e["u0"] if e["opt"] else r["Số lượng theo BOM (1)"]}
                          for r, e in zip(rows, eff0)])
     view = pd.concat([view, st.session_state[k_in].reset_index(drop=True)], axis=1)
     edited = st.data_editor(
@@ -2999,13 +3017,16 @@ def render_pr_tab(res, P, calc):
                        f"phế {o['waste_pct']:g}%{old}" + (" · ⚠ có ước lượng" if o["est_codes"] else ""))
             tbl = pd.DataFrame([{"Phương án": x["label"] + (" ★" if x["key"] == co["rec"] else ""),
                                  "Số cây/tấm (1)": x["u0"], "Gồm contingency": x["u1"], "Chi tiết": x["breakdown"],
-                                 "KL mua (kg)": x["kg1"], "% phế": x["waste_pct"],
+                                 "KL (1) (kg)": x["kg0"], "KL gồm contingency (kg)": x["kg1"], "% phế": x["waste_pct"],
                                  "Đoạn dư dùng lại (m)": x["remnant_mm"] / 1000 if x["kind"] == "bar" else None,
-                                 "Cách cũ": x["old"],
+                                 "Cách cũ": x["old"], "Khổ cách cũ": x["old_size"], "KL cách cũ (kg)": x["old_kg"],
+                                 "Chênh KL (1) − cũ (kg)": None if x["old_kg"] is None else x["kg0"] - x["old_kg"],
                                  "Ước lượng (thiếu kích thước / quá khổ)": ", ".join(dict.fromkeys(x["est_codes"]))}
                                 for x in co["options"]])
             st.dataframe(tbl, hide_index=True, width="stretch",
-                         column_config={"KL mua (kg)": NUMCFG(format="localized"), "% phế": NUMCFG(format="%.2f"),
+                         column_config={"KL (1) (kg)": NUMCFG(format="localized"), "KL gồm contingency (kg)": NUMCFG(format="localized"),
+                                        "KL cách cũ (kg)": NUMCFG(format="localized"),
+                                        "Chênh KL (1) − cũ (kg)": NUMCFG(format="localized"), "% phế": NUMCFG(format="%.2f"),
                                         "Đoạn dư dùng lại (m)": NUMCFG(format="%.2f")})
             with st.expander(f"Xem sơ đồ cắt – {o['label']} ({o['u1'] - o['est1']} {dv_} có sơ đồ)"):
                 plan = pd.DataFrame(pr_plan_rows(o, cfg))
@@ -3023,7 +3044,9 @@ def render_pr_tab(res, P, calc):
     if flagged:
         st.warning("⚠️ Có số ước lượng (thiếu kích thước chi tiết – giữ cách cũ): " + ", ".join(flagged))
     out = pd.DataFrame([{"Nhóm": r["Nhóm"], "Tên mặt hàng và quy cách": r["Tên mặt hàng và quy cách"],
-                         "Kích thước": e["Kích thước"], "ĐVT": e["ĐVT"], "Cách cũ": e["Cách cũ"],
+                         "Kích thước": e["Kích thước"], "ĐVT": e["ĐVT"], "Khổ cách cũ": e["Khổ cách cũ"],
+                         "Cách cũ": e["Cách cũ"], "KL cách cũ (kg)": e["KL cách cũ"], "KL tối ưu (1) (kg)": e["KL tối ưu"],
+                         "Chênh KL (kg)": None if e["KL cách cũ"] is None else e["KL tối ưu"] - e["KL cách cũ"],
                          "Theo tối ưu (1)": c["(1)"], "Phương án": e["Phương án"], "% phế": e["% phế"],
                          "Đoạn dư dùng lại": e["Đoạn dư dùng lại"], "Tồn (2)": i.get("Số lượng tồn (2)"),
                          "Tỷ lệ (%)": i.get("Tỷ lệ contingency (%)"),
@@ -3031,13 +3054,19 @@ def render_pr_tab(res, P, calc):
                          "KL tịnh theo BOM (kg)": r["KL tịnh theo BOM (kg)"]}
                         for r, i, c, e in zip(rows, inputs, calc_rows, eff)])
     num = NUMCFG(format="localized")
-    txt_cols = ("Nhóm", "Tên mặt hàng và quy cách", "Kích thước", "ĐVT", "Phương án", "Đoạn dư dùng lại")
+    txt_cols = ("Nhóm", "Tên mặt hàng và quy cách", "Kích thước", "Khổ cách cũ", "ĐVT", "Phương án", "Đoạn dư dùng lại")
     st.dataframe(out, hide_index=True, width="stretch", height=420,
                  column_config={c: num for c in out.columns if c not in txt_cols})
-    m1, m2, m3 = st.columns(3)
+    cmp_ = [e for e in eff if e["KL cách cũ"] is not None and e["KL tối ưu"] is not None]
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Số dòng vật tư", len(rows))
     m2.metric("KL theo SL mua (kg)", f"{sum(x['KL theo SL mua (kg)'] or 0 for x in calc_rows):,.1f}")
     m3.metric("KL tịnh theo BOM (kg)", f"{sum(r['KL tịnh theo BOM (kg)'] or 0 for r in rows):,.1f}")
+    m4.metric("KL cách cũ (kg)", f"{sum(e['KL cách cũ'] for e in cmp_):,.1f}",
+              help="Tổng KL mua theo cách cũ, chỉ các dòng thép có so sánh được (chưa contingency)")
+    m5.metric("KL tối ưu (1) (kg)", f"{sum(e['KL tối ưu'] for e in cmp_):,.1f}",
+              delta=f"{sum(e['KL tối ưu'] - e['KL cách cũ'] for e in cmp_):+,.1f}", delta_color="off",
+              help="Cùng các dòng trên, theo sơ đồ cắt (chưa contingency). Dương = cách cũ mua thiếu")
     try:
         xb = build_pr_excel(base, inputs, res, P, calc, eff, cfg)
         st.download_button("⬇️ Tải Phiếu PR đề xuất mua hàng (Excel)", xb,

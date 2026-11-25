@@ -93,6 +93,23 @@ def test_missing_dims_flagged():
     assert e2["flag"] and e2["opt"] is None and e2["ĐVT"] == "Kg"
 
 
+def test_old_method_keeps_its_own_size_and_kg():
+    # Dòng có định mức GHI CHÚ (cách cũ đếm theo khổ 3000x1250): so sánh phải dùng khổ + KL/tấm của cách cũ, không phải của phương án
+    r = row(app.PR_GROUPS[0], "Thép tấm 4.0", [("S", 50, pp(t=4, w=300, l=400, kg=3.77))], kg_net=188.5)
+    r.update({"ĐVT cách cũ": "Tấm", "Cách cũ": 10, "Kích thước": "3000 x 1250mm", "KL / ĐVT (kg)": 117.75})
+    co = app.pr_cut_options(r, 0, CFG)
+    for o in co["options"]:
+        assert o["old"] == 10 and o["old_size"] == "3000 x 1250mm" and abs(o["old_kg"] - 1177.5) < 1e-9
+        assert abs(o["kg0"] - o["u0"] * o["unit"]) < 1e-9
+    e = app.pr_effective([r], [co])[0]
+    assert e["Khổ cách cũ"] == "3000 x 1250mm" and abs(e["KL cách cũ"] - 1177.5) < 1e-9 and e["KL tối ưu"] > 0
+    # Dòng chưa có định mức (ĐVT Kg): cách cũ = quy kg ÷ KL/tấm của chính phương án → cùng khổ
+    r2 = row(app.PR_GROUPS[0], "Thép tấm 4.0", [("S", 50, pp(t=4, w=300, l=400, kg=3.77))], kg_net=188.5)
+    r2.update({"Kích thước": "", "KL / ĐVT (kg)": None})
+    for o in app.pr_cut_options(r2, 0, CFG)["options"]:
+        assert o["old_size"] == o["size"] and o["old"] == app._ceil(188.5 / o["unit"])
+
+
 def test_sheet_row_and_too_big():
     r = row(app.PR_GROUPS[0], "Thép tấm 4.0", [("BIG", 3, pp(t=4, w=240, l=2734, kg=20.5)),
                                                ("S", 50, pp(t=4, w=300, l=400, kg=3.77))])
