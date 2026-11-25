@@ -500,6 +500,28 @@ def parse_so(data, filename):
     return pd.DataFrame(rows, columns=SO_COLS), warns, info
 
 
+def parse_so_multi(files):
+    """Nạp nhiều file SO (mỗi file 1 hay nhiều đơn hàng). 1 file → y hệt parse_so. Nhiều file → ghép theo thứ tự file,
+    thêm cột 'File SO', đánh lại STT; cùng 1 thành phẩm ở nhiều file vẫn giữ riêng từng dòng (mỗi dòng = 1 lệnh SX),
+    MRP và sơ đồ cắt tự cộng chung."""
+    if len(files) == 1:
+        return parse_so(*files[0])
+    dfs, warns, infos = [], [], []
+    for data, name in files:
+        df, w, info = parse_so(data, name)
+        df = df.copy()
+        df["File SO"] = name
+        dfs.append(df)
+        warns += [f"[{name}] {x}" for x in w]
+        infos.append((name, info))
+    out = pd.concat(dfs, ignore_index=True)
+    out["STT"] = range(1, len(out) + 1)
+    info = {"sheet": "; ".join(f"{n} › {i['sheet']}" for n, i in infos),
+            "header_row": "; ".join(f"{n}: {i['header_row']}" for n, i in infos),
+            "mapping": {n: i["mapping"] for n, i in infos}}
+    return out, warns, info
+
+
 @st.cache_data(show_spinner=False)
 def parse_po(data, filename):
     grids = read_grids(data, filename)
@@ -1435,11 +1457,8 @@ def compute_financials(res, so_df, stage_rates, P):
 #   "1m2 được N pcs", chi tiết không ghi định mức, phần hao hụt còn lại → CỘNG DỒN rồi mới làm tròn lên.
 
 PR_GROUPS = ["THÉP TẤM", "THÉP CÂY", "VẬT TƯ MUA NGOÀI"]
-_NUM = r"(\d+(?:[.,]\d+)?)"
-_PR_SHEET_RE = re.compile(rf"{_NUM}\s*[x×]\s*{_NUM}\s*(?:mm)?\s*duoc\s*{_NUM}\s*(?:pcs|cai|ct|chi tiet)")
-_PR_BAR_RE = re.compile(rf"cay\s*{_NUM}\s*m\b.*?duoc\s*{_NUM}\s*(?:pcs|cai|ct|chi tiet)")
-_PR_M2_RE = re.compile(rf"{_NUM}\s*m2\s*duoc\s*{_NUM}\s*(?:pcs|cai|ct|chi tiet)")
 PR_INPUT_COLS = ["Số lượng tồn (2)", "Tỷ lệ contingency (%)"]
+PR_DP = "DP"   # chủ sở hữu "Dự phòng (contingency)" trong bảng cấp phát
 
 
 def _ceil(x):
@@ -1459,7 +1478,8 @@ def pr_group(n):
 
 
 def _unit_kg(group, std, part, kho):
-    """KL 1 tấm / 1 cây (kg) từ khổ phôi + kích thước tiết diện của chi tiết + khối lượng riêng (mặc định 7.85)."""
+    """KL 1 tấm / 1 cây (kg) từ khổ phôi + kích thước tiết diện của chi tiết + khối lượng riêng (mặc định 7.85).
+    kho = (dài, rộng) mm với tấm, (dài,) mm với cây."""
     if not kho or not part:
         return None
     klr = part["klr"] or 7.85
@@ -1472,167 +1492,6 @@ def _unit_kg(group, std, part, kho):
     if re.search(r"\bong\b", s) and w > 0 and t > 0:
         return math.pi * t * (w - t) * L * klr * 1e-6
     return math.pi / 4 * w * w * L * klr * 1e-6 if w > 0 else None
-
-
-def build_pr_base(res):
-    """Dữ liệu Phiếu PR từ kết quả MRP: dòng vật tư (SL theo BOM (1) đã quy tấm/cây), định mức cắt từng chi tiết,
-    ma trận vật tư × thành phẩm. Không sửa res."""
-    nodes, so_lines, fg_cum = res["nodes"], res["so_lines"], res["fg_cum"]
-    mrp = res["mrp_df"].to_dict("records")
-    parts_by_rm = defaultdict(list)
-    for code, n in nodes.items():
-        pp = n.get("pr_part")
-        if not pp:
-            continue
-        q = sum(l["Số Lượng"] * fg_cum.get(l["Mã Sản Phẩm ERP"], {}).get(code, 0.0) for l in so_lines)
-        if q > 0:
-            # Cùng chi tiết ghi khác nhau ở khoảng trắng / hoa thường (VD "ME600630" và "ME 600630") → gộp trước khi làm tròn
-            key = ncode(show_code(code))
-            lst = parts_by_rm[pp["rm"]]
-            hit = next((k for k, (c0, _, p0) in enumerate(lst)
-                        if ncode(show_code(c0)) == key and p0["kg"] == pp["kg"] and norm(p0["note"]) == norm(pp["note"])), None)
-            if hit is None:
-                lst.append((code, q, pp))
-            else:
-                lst[hit] = (lst[hit][0], lst[hit][1] + q, lst[hit][2])
-    # Khổ tấm phổ biến nhất trong BOM – dùng khi một loại thép tấm chỉ có chi tiết ghi "1m2 được…" / không ghi khổ
-    common_sheet = Counter()
-    for lst in parts_by_rm.values():
-        for _, _, pp in lst:
-            ms = _PR_SHEET_RE.search(norm(pp["note"]))
-            if ms:
-                common_sheet[tuple(sorted((to_float(ms.group(1)), to_float(ms.group(2))), reverse=True))] += 1
-    rows, cut_rows = [], []
-    sug_sheet, sug_bar = Counter(), Counter()  # khổ tấm / chiều dài cây xuất hiện trong GHI CHÚ BOM → gợi ý danh mục cắt
-    for i, m in enumerate(mrp):
-        c = m["Mã NVL"]
-        n = nodes[c]
-        grp = pr_group(n)
-        notes = n.get("pr_notes", [])
-        row = {"Nhóm": grp, "Mã vật tư": n.get("pr_src", "") if grp == PR_GROUPS[2] else "", "Mã NVL app": c,
-               "Tên mặt hàng và quy cách": m["Tên NVL"], "Kích thước": "", "Vật liệu / Mác": ", ".join(n.get("pr_grades", [])),
-               "ĐVT": m["ĐVT"], "Số lượng theo BOM (1)": m["Nhu cầu MRP"], "Tối thiểu nếu ghép chung": None,
-               "KL / ĐVT (kg)": None, "KL tịnh theo BOM (kg)": m["Nhu cầu MRP"] if m["ĐVT"] == "Kg" else None,
-               "Ghi chú": "; ".join(notes), "_i": i}
-        if grp != PR_GROUPS[2]:
-            parts = parts_by_rm.get(c, [])
-            parsed, sizes = [], Counter()
-            row["_parsed"], row["_std"] = parsed, n["std"] or n["name"]  # cho tối ưu cắt (pr_cut_options)
-            for code, q, pp in parts:
-                s = norm(pp["note"])
-                ms, mb, mm = _PR_SHEET_RE.search(s), _PR_BAR_RE.search(s), _PR_M2_RE.search(s)
-                if grp == PR_GROUPS[0] and ms:
-                    kho = (to_float(ms.group(1)), to_float(ms.group(2)))
-                    parsed.append((code, q, pp, "sheet", kho, to_float(ms.group(3))))
-                    sizes[tuple(sorted(kho, reverse=True))] += 1
-                elif grp == PR_GROUPS[1] and mb:
-                    kho = (to_float(mb.group(1)) * 1000,)
-                    parsed.append((code, q, pp, "bar", kho, to_float(mb.group(2))))
-                    sizes[kho] += 1
-                elif grp == PR_GROUPS[0] and mm:
-                    parsed.append((code, q, pp, "m2", None, to_float(mm.group(2)) / (to_float(mm.group(1)) or 1)))
-                else:
-                    parsed.append((code, q, pp, "kg", None, None))
-            for k_, n_ in sizes.items():
-                (sug_sheet if len(k_) == 2 else sug_bar)[k_] += n_
-            kho = sizes.most_common(1)[0][0] if sizes else None
-            if kho is None and grp == PR_GROUPS[0] and common_sheet:
-                kho = common_sheet.most_common(1)[0][0]
-            ref = next((p for _, _, p, k, *_ in parsed if k in ("sheet", "bar")), parts[0][2] if parts else None)
-            unit = _unit_kg(grp, n["std"] or n["name"], ref, kho)
-            if kho and unit:
-                whole, pool, exact, used_kg = 0, 0.0, 0.0, 0.0
-                for code, q, pp, kind, k2, N in parsed:
-                    kg = q * pp["kg"]
-                    used_kg += kg
-                    if kind in ("sheet", "bar") and N:
-                        need = q / N
-                        whole += _ceil(need)
-                        rule = f"{N:g} cái/tấm" if kind == "sheet" else f"{N:g} cái/cây {kho[0] / 1000:g}m"
-                    elif kind == "m2" and N:
-                        need = q / N / (kho[0] * kho[1] * 1e-6) if grp == PR_GROUPS[0] else kg / unit
-                        pool += need
-                        rule = f"{N:g} cái/m2 (tấm lẻ)"
-                    else:
-                        need = kg / unit
-                        pool += need
-                        rule = "Không ghi định mức – quy theo KL"
-                    exact += need
-                    cut_rows.append({"Vật tư": m["Tên NVL"], "Khổ phôi": "", "Mã chi tiết": show_code(code),
-                                     "Tên chi tiết": pp["desc"], "SL chi tiết": q, "Định mức theo BOM": rule,
-                                     "Tấm / cây cần": need, "KL tịnh (kg)": kg, "_rm": c})
-                rest = m["Nhu cầu MRP"] - used_kg
-                if rest > 1e-3:  # hao hụt / NVL không qua chi tiết có định mức → cộng vào phần ghép chung
-                    pool += rest / unit
-                    exact += rest / unit
-                    cut_rows.append({"Vật tư": m["Tên NVL"], "Khổ phôi": "", "Mã chi tiết": "", "Tên chi tiết": "Hao hụt / phần còn lại",
-                                     "SL chi tiết": None, "Định mức theo BOM": "Quy theo KL", "Tấm / cây cần": rest / unit,
-                                     "KL tịnh (kg)": rest, "_rm": c})
-                total = whole + _ceil(pool)
-                kho_txt = (f"{kho[0]:g} x {kho[1]:g}mm" if grp == PR_GROUPS[0] else f"{kho[0]:g}mm")
-                for cr in cut_rows:
-                    if cr["_rm"] == c:
-                        cr["Khổ phôi"] = kho_txt
-                cut_rows.append({"Vật tư": f"→ {m['Tên NVL']}: cần {total} {'tấm' if grp == PR_GROUPS[0] else 'cây'} "
-                                           f"(tối thiểu nếu ghép chung {exact:.2f})", "Khổ phôi": "", "Mã chi tiết": "",
-                                 "Tên chi tiết": "", "SL chi tiết": None, "Định mức theo BOM": "", "Tấm / cây cần": total,
-                                 "KL tịnh (kg)": m["Nhu cầu MRP"], "_rm": c, "_sum": True})
-                row.update({"Kích thước": kho_txt, "ĐVT": "Tấm" if grp == PR_GROUPS[0] else "Cây",
-                            "Số lượng theo BOM (1)": total, "Tối thiểu nếu ghép chung": exact, "KL / ĐVT (kg)": unit,
-                            "Ghi chú": "Quy đổi theo định mức cắt BOM"})
-        row["_ids"] = [i]
-        rows.append(row)
-    # Vật tư mua ngoài cùng tên + ĐVT nhưng khác mã (VD mã đóng gói riêng từng FG) → 1 dòng mua, cộng dồn số lượng
-    merged, seen = [], {}
-    for r in rows:
-        key = (r["Nhóm"], norm(r["Tên mặt hàng và quy cách"]), r["ĐVT"]) if r["Nhóm"] == PR_GROUPS[2] else None
-        if key is not None and key in seen:
-            t = seen[key]
-            t["Số lượng theo BOM (1)"] += r["Số lượng theo BOM (1)"]
-            t["_ids"] += r["_ids"]
-            for fld in ("Mã vật tư", "Ghi chú", "Vật liệu / Mác"):
-                parts = [x for x in (t[fld].split("; ") if t[fld] else []) + ([r[fld]] if r[fld] else [])]
-                t[fld] = "; ".join(dict.fromkeys(parts))
-            continue
-        if key is not None:
-            seen[key] = r
-        merged.append(r)
-    rows = merged
-    for r in rows:  # cách cũ (định mức GHI CHÚ / quy KL) giữ lại để so sánh với tối ưu cắt
-        r["Cách cũ"], r["ĐVT cách cũ"] = r["Số lượng theo BOM (1)"], r["ĐVT"]
-    order = {g: k for k, g in enumerate(PR_GROUPS)}
-    rows.sort(key=lambda r: (order[r["Nhóm"]], r["_i"]))
-    model = []
-    for r in rows:
-        ids = r["_ids"]
-        model.append({"Vật tư": r["Tên mặt hàng và quy cách"] + (" (kg tịnh)" if mrp[ids[0]]["ĐVT"] == "Kg" else ""),
-                      "ĐVT": mrp[ids[0]]["ĐVT"],
-                      "_vals": [sum(l["Số Lượng"] * res["R"][i][j] for i in ids) for j, l in enumerate(so_lines)],
-                      "Ghi chú": (f"Quy đổi: {r['Số lượng theo BOM (1)']} {r['ĐVT'].lower()} (xem sheet Dinh_muc_cat)"
-                                  if r["ĐVT"] in ("Tấm", "Cây") else "")})
-    suggest = {"sheets": [(int(min(k)), int(max(k))) for k, _ in sug_sheet.most_common()],   # (rộng, dài)
-               "bars": [int(k[0]) for k, _ in sug_bar.most_common()]}
-    return {"rows": rows, "cut": cut_rows, "model": model, "suggest": suggest}
-
-
-# ---- Tối ưu cắt cho phiếu PR (thuật toán ở cutting.py) – quy số chi tiết ra số CÂY / TẤM thật phải mua ----
-# Không đụng MRP: chỉ đọc pr_part (kích thước, SL chi tiết) đã có. Contingency áp vào SỐ CHI TIẾT trước khi tối ưu.
-PR_CUT_DEFAULT = {"bars": [(6000, True), (12000, False)],
-                  "sheets": [(1250, 2500, True), (1500, 3000, True), (1500, 6000, True)],
-                  "kerf": 3, "trim": 10, "remnant": 500, "gap": 5}
-
-
-def pr_cut_cfg(cfg=None):
-    """Chuẩn hóa thông số cắt; không có loại cây / khổ nào được bật → dùng mặc định (luôn có ít nhất 1 phương án)."""
-    if cfg and cfg.get("_norm"):
-        return cfg
-    c = dict(PR_CUT_DEFAULT, **(cfg or {}))
-    bars = sorted({int(L) for L, on in c["bars"] if on and L and L > 0})
-    sheets = sorted({tuple(sorted((int(a), int(b)))) for a, b, on in c["sheets"] if on and a and b and a > 0 and b > 0})
-    return {"bars": tuple(bars or [L for L, on in PR_CUT_DEFAULT["bars"] if on]),
-            "sheets": tuple(sheets or [tuple(sorted((a, b))) for a, b, on in PR_CUT_DEFAULT["sheets"] if on]),
-            "kerf": int(c["kerf"]), "trim": int(c["trim"]), "remnant": int(c["remnant"]), "gap": int(c["gap"]),
-            "_norm": True}
 
 
 def _pp_sheet_dims(pp):
@@ -1653,16 +1512,127 @@ def _pp_bar_len(std, pp):
     return ln
 
 
-def pr_cut_kind(row):
-    """'sheet' / 'bar' nếu dòng thép có ít nhất 1 chi tiết đủ kích thước để tối ưu; None → giữ cách cũ."""
-    parsed = row.get("_parsed") or []
-    if row["Nhóm"] == PR_GROUPS[0] and any(_pp_sheet_dims(p[2]) for p in parsed):
-        return "sheet"
-    if row["Nhóm"] == PR_GROUPS[1]:
-        for p in parsed:
-            if _pp_bar_len(row["_std"], p[2]) and _unit_kg(PR_GROUPS[1], row["_std"], p[2], (1000,)):
-                return "bar"
-    return None
+def _pp_missing(group, std, pp):
+    """Tên các kích thước còn thiếu để cắt được chi tiết (rỗng = đủ)."""
+    t, w, w2, ln, s = pp.get("t", 0), pp.get("w", 0), pp.get("w2", 0), pp.get("l", 0), norm(std)
+    need = [("Dày", t), ("Rộng", w), ("Dài", ln)] if group == PR_GROUPS[0] else [("Rộng", w), ("Dài", ln)]
+    if group == PR_GROUPS[1] and re.search(r"\bhop\b", s):
+        need += [("Rộng B", w2), ("Dày", t)]
+    elif group == PR_GROUPS[1] and re.search(r"\bong\b", s):
+        need += [("Dày", t)]
+    return [k for k, v in need if not v or v <= 0]
+
+
+def pr_line_label(so_lines, j):
+    """Nhãn 1 lệnh sản xuất = 1 dòng SO (dùng cho bảng cấp phát)."""
+    if j == PR_DP:
+        return "Dự phòng (contingency)"
+    l = so_lines[j]
+    src = f" – {l['File SO']}" if l.get("File SO") else ""
+    return f"#{j + 1} {l['Mã Sản Phẩm ERP']}{src}"
+
+
+def build_pr_base(res):
+    """Dữ liệu Phiếu PR từ kết quả MRP: dòng vật tư, danh sách chi tiết cắt (kích thước + SL theo từng dòng SO),
+    ma trận vật tư × thành phẩm. Không đọc GHI CHÚ để quy đổi; không sửa res."""
+    nodes, so_lines, fg_cum = res["nodes"], res["so_lines"], res["fg_cum"]
+    mrp = res["mrp_df"].to_dict("records")
+    parts_by_rm = defaultdict(list)
+    for code, n in nodes.items():
+        pp = n.get("pr_part")
+        if not pp:
+            continue
+        lines = {j: l["Số Lượng"] * fg_cum.get(l["Mã Sản Phẩm ERP"], {}).get(code, 0.0) for j, l in enumerate(so_lines)}
+        lines = {j: q for j, q in lines.items() if q > 1e-9}
+        q = sum(lines.values())
+        if q <= 0:
+            continue
+        # Cùng chi tiết ghi khác nhau ở khoảng trắng / hoa thường (VD "ME600630" và "ME 600630"), cùng kích thước → gộp
+        key = (ncode(show_code(code)), pp["t"], pp["w"], pp["w2"], pp["l"], pp["kg"])
+        lst = parts_by_rm[pp["rm"]]
+        hit = next((it for it in lst if it["_key"] == key), None)
+        if hit is None:
+            lst.append({"code": code, "q": q, "pp": pp, "lines": lines, "_key": key})
+        else:
+            hit["q"] += q
+            for j, v in lines.items():
+                hit["lines"][j] = hit["lines"].get(j, 0.0) + v
+    rows, cut_rows = [], []
+    for i, m in enumerate(mrp):
+        c = m["Mã NVL"]
+        n = nodes[c]
+        grp = pr_group(n)
+        std = n["std"] or n["name"]
+        row = {"Nhóm": grp, "Mã vật tư": n.get("pr_src", "") if grp == PR_GROUPS[2] else "", "Mã NVL app": c,
+               "Tên mặt hàng và quy cách": m["Tên NVL"], "Kích thước": "", "Vật liệu / Mác": ", ".join(n.get("pr_grades", [])),
+               "ĐVT": m["ĐVT"], "Số lượng theo BOM (1)": m["Nhu cầu MRP"], "KL / ĐVT (kg)": None,
+               "KL tịnh theo BOM (kg)": m["Nhu cầu MRP"] if m["ĐVT"] == "Kg" else None,
+               "Ghi chú": "; ".join(n.get("pr_notes", [])), "_i": i, "_ids": [i], "_std": std,
+               "_mrp_lines": [l["Số Lượng"] * res["R"][i][j] for j, l in enumerate(so_lines)]}
+        if grp != PR_GROUPS[2]:
+            parts = parts_by_rm.get(c, [])
+            row["_parts"] = parts
+            for it in parts:
+                pp, miss = it["pp"], _pp_missing(grp, std, it["pp"])
+                cut_rows.append({"Vật tư": m["Tên NVL"], "Mã chi tiết": show_code(it["code"]), "Tên chi tiết": pp["desc"],
+                                 "Dày": pp["t"] or None, "Rộng": pp["w"] or None, "Rộng B": pp["w2"] or None,
+                                 "Dài": pp["l"] or None, "SL chi tiết": it["q"], "KL / chi tiết (kg)": pp["kg"],
+                                 "KL tịnh (kg)": it["q"] * pp["kg"],
+                                 "Trạng thái": "✅ Đủ kích thước" if not miss else "❌ Thiếu " + ", ".join(miss)})
+            if not parts:
+                cut_rows.append({"Vật tư": m["Tên NVL"], "Mã chi tiết": "", "Tên chi tiết": "", "Dày": None, "Rộng": None,
+                                 "Rộng B": None, "Dài": None, "SL chi tiết": None, "KL / chi tiết (kg)": None,
+                                 "KL tịnh (kg)": m["Nhu cầu MRP"],
+                                 "Trạng thái": "❌ NVL nhập thẳng theo kg – không có chi tiết mang kích thước"})
+        rows.append(row)
+    # Vật tư mua ngoài cùng tên + ĐVT nhưng khác mã (VD mã đóng gói riêng từng FG) → 1 dòng mua, cộng dồn số lượng
+    merged, seen = [], {}
+    for r in rows:
+        key = (r["Nhóm"], norm(r["Tên mặt hàng và quy cách"]), r["ĐVT"]) if r["Nhóm"] == PR_GROUPS[2] else None
+        if key is not None and key in seen:
+            t = seen[key]
+            t["Số lượng theo BOM (1)"] += r["Số lượng theo BOM (1)"]
+            t["_ids"] += r["_ids"]
+            t["_mrp_lines"] = [a + b for a, b in zip(t["_mrp_lines"], r["_mrp_lines"])]
+            for fld in ("Mã vật tư", "Ghi chú", "Vật liệu / Mác"):
+                parts = [x for x in (t[fld].split("; ") if t[fld] else []) + ([r[fld]] if r[fld] else [])]
+                t[fld] = "; ".join(dict.fromkeys(parts))
+            continue
+        if key is not None:
+            seen[key] = r
+        merged.append(r)
+    rows = merged
+    order = {g: k for k, g in enumerate(PR_GROUPS)}
+    rows.sort(key=lambda r: (order[r["Nhóm"]], r["_i"]))
+    model = []
+    for r in rows:
+        ids = r["_ids"]
+        model.append({"Vật tư": r["Tên mặt hàng và quy cách"] + (" (kg tịnh)" if mrp[ids[0]]["ĐVT"] == "Kg" else ""),
+                      "ĐVT": mrp[ids[0]]["ĐVT"],
+                      "_vals": [sum(l["Số Lượng"] * res["R"][i][j] for i in ids) for j, l in enumerate(so_lines)],
+                      "Ghi chú": "Quy đổi tấm / cây theo sơ đồ cắt (sheet So_do_cat)" if r["Nhóm"] != PR_GROUPS[2] else ""})
+    return {"rows": rows, "cut": cut_rows, "model": model}
+
+
+# ---- Tối ưu cắt cho phiếu PR (thuật toán ở cutting.py) – quy số chi tiết ra số CÂY / TẤM thật phải mua ----
+# Không đụng MRP: chỉ đọc pr_part (kích thước, SL chi tiết). Contingency áp vào SỐ CHI TIẾT trước khi tối ưu.
+# Chỉ thuật toán: không đọc GHI CHÚ, không ước lượng. Thiếu kích thước / quá khổ → báo lỗi, không ra số.
+PR_CUT_DEFAULT = {"bars": [(6000, True), (12000, False)],
+                  "sheets": [(1250, 2500, True), (1500, 3000, True), (1500, 6000, True)],
+                  "kerf": 3, "trim": 10, "remnant": 500, "gap": 5}
+
+
+def pr_cut_cfg(cfg=None):
+    """Chuẩn hóa thông số cắt; không có loại cây / khổ nào được bật → dùng mặc định (luôn có ít nhất 1 phương án)."""
+    if cfg and cfg.get("_norm"):
+        return cfg
+    c = dict(PR_CUT_DEFAULT, **(cfg or {}))
+    bars = sorted({int(L) for L, on in c["bars"] if on and L and L > 0})
+    sheets = sorted({tuple(sorted((int(a), int(b)))) for a, b, on in c["sheets"] if on and a and b and a > 0 and b > 0})
+    return {"bars": tuple(bars or [L for L, on in PR_CUT_DEFAULT["bars"] if on]),
+            "sheets": tuple(sheets or [tuple(sorted((a, b))) for a, b, on in PR_CUT_DEFAULT["sheets"] if on]),
+            "kerf": int(c["kerf"]), "trim": int(c["trim"]), "remnant": int(c["remnant"]), "gap": int(c["gap"]),
+            "_norm": True}
 
 
 @st.cache_data(show_spinner=False, max_entries=2048)
@@ -1678,81 +1648,59 @@ def _pack_c(pieces, W, Lg, gap):
     return pack_sheets(list(pieces), W, Lg, gap)
 
 
-def _est_units(items, c, rate, unit, area_m2, kind):
-    """Cách cũ cho chi tiết không tối ưu được (thiếu kích thước / quá khổ): định mức GHI CHÚ theo từng chi tiết,
-    còn lại cộng dồn KL ÷ KL 1 cây/tấm rồi làm tròn lên."""
-    whole, pool = 0, 0.0
-    for code, q, pp, nk, _, N in items:
-        q0 = _ceil(q)
-        qc = q0 + (_ceil(q0 * rate) if c else 0)
-        if nk in ("sheet", "bar") and N:
-            whole += _ceil(qc / N)
-        elif nk == "m2" and N and kind == "sheet" and area_m2:
-            pool += qc / N / area_m2
-        elif unit:
-            pool += qc * pp["kg"] / unit
-    return whole + _ceil(pool)
+def _pr_qty(q, rate, c):
+    """Số chi tiết đem cắt: ROUNDUP(SL BOM), cộng ROUNDUP(… × tỷ lệ contingency) nếu c."""
+    q0 = _ceil(q)
+    return q0 + (_ceil(q0 * rate) if c else 0)
+
+
+def _pr_piece_dim(kind, std, pp):
+    """Kích thước nguyên (mm) dùng làm khóa cắt: cây → chiều dài; tấm → (cạnh dài, cạnh ngắn)."""
+    if kind == "bar":
+        return int(math.ceil(_pp_bar_len(std, pp)))
+    d = _pp_sheet_dims(pp)
+    return (int(math.ceil(max(d))), int(math.ceil(min(d))))
 
 
 def pr_cut_options(row, rate, cfg):
     """Các phương án cắt của 1 dòng thép. rate = tỷ lệ contingency (0.03 = 3%), áp vào SỐ CHI TIẾT (ROUNDUP).
     Mỗi phương án: u0 = số cây/tấm cho SL chi tiết theo BOM, u1 = có contingency, sơ đồ cắt (của u1), % phế, đoạn dư.
-    Trả None nếu không tối ưu được (giữ cách cũ)."""
-    kind = pr_cut_kind(row)
-    if not kind:
+    None với vật tư mua ngoài. Thép thiếu dữ liệu / không phương án nào cắt được → {"error": …, "options": []}."""
+    grp = row["Nhóm"]
+    if grp == PR_GROUPS[2]:
         return None
+    kind = "sheet" if grp == PR_GROUPS[0] else "bar"
     cfg = pr_cut_cfg(cfg)
-    grp, std, parsed = row["Nhóm"], row["_std"], row["_parsed"]
+    std, parts = row["_std"], row.get("_parts") or []
+    out = {"kind": kind, "options": [], "rec": None, "invalid": [], "error": None,
+           "missing": [f"{show_code(it['code'])} (thiếu {', '.join(_pp_missing(grp, std, it['pp']))})"
+                       for it in parts if _pp_missing(grp, std, it["pp"])]}
+    if not parts:
+        out["error"] = "NVL nhập thẳng theo kg, không có chi tiết mang kích thước để tính cắt"
+        return out
+    if out["missing"]:
+        out["error"] = "Thiếu kích thước chi tiết: " + "; ".join(out["missing"])
+        return out
     kerf, trim, gap = cfg["kerf"], cfg["trim"], cfg["gap"]
-    good, miss = [], []
-    for it in parsed:
-        d = _pp_sheet_dims(it[2]) if kind == "sheet" else _pp_bar_len(std, it[2])
-        (good if d else miss).append((it, d))
-    ref = good[0][0][2]
-    kg_net = row["KL tịnh theo BOM (kg)"] or 0.0
-
-    def qty(q, c):
-        q0 = _ceil(q)
-        return q0 + (_ceil(q0 * rate) if c else 0)
-
-    def old_units(unit):  # cách cũ để so sánh: định mức GHI CHÚ nếu có, ngược lại quy KL ÷ KL 1 cây/tấm
-        if row["ĐVT cách cũ"] in ("Tấm", "Cây"):
-            return row["Cách cũ"]
-        return _ceil(kg_net / unit) if unit else None
-
-    def old_info(unit, size):
-        """Cách cũ kèm khổ và KL của nó: có định mức GHI CHÚ → đếm theo khổ ghi chú; không có → quy kg theo khổ phương án."""
-        if row["ĐVT cách cũ"] in ("Tấm", "Cây"):
-            n, sz, u = row["Cách cũ"], row["Kích thước"], row["KL / ĐVT (kg)"]
-        else:
-            n, sz, u = old_units(unit), size, unit
-        return n, sz, (n * u if n is not None and u else None)
-
+    ref = parts[0]["pp"]
+    dims = [(it, _pr_piece_dim(kind, std, it["pp"])) for it in parts]
     opts = []
     if kind == "bar":
         kg_m = _unit_kg(grp, std, ref, (1000,))
         sets = [(L,) for L in cfg["bars"]] + ([cfg["bars"]] if len(cfg["bars"]) > 1 else [])
         for s in sets:
             Lmax = max(s)
-            fit = [(it, d) for it, d in good if math.ceil(d) <= Lmax - trim]
-            out = [it for it, d in good if math.ceil(d) > Lmax - trim] + [it for it, _ in miss]
-            unit_max = kg_m * Lmax / 1000
-            o = {"key": "+".join(map(str, s)), "kind": kind, "lens": s,
-                 "label": f"Chỉ {s[0] / 1000:g} m" if len(s) == 1 else "Trộn " + " + ".join(f"{x / 1000:g} m" for x in s),
-                 "est_codes": [show_code(it[0]) for it in out],
-                 "too_long": [show_code(it[0]) for it, d in good if math.ceil(d) > Lmax - trim]}
+            label = f"Chỉ {s[0] / 1000:g} m" if len(s) == 1 else "Trộn " + " + ".join(f"{x / 1000:g} m" for x in s)
+            too = sorted({show_code(it["code"]) for it, d in dims if d + kerf > Lmax - trim + kerf})
+            if too:
+                out["invalid"].append((label, f"dài hơn cây {Lmax:g} mm (trừ đầu cây): " + ", ".join(too)))
+                continue
+            o = {"key": "+".join(map(str, s)), "kind": kind, "lens": s, "label": label, "kg_m": kg_m}
             for c in (0, 1):
-                pcs = tuple(sorted((int(math.ceil(d)), qty(it[1], c), show_code(it[0])) for it, d in fit))
-                r = _cut_bars_c(pcs, tuple(s), kerf, trim, cfg["remnant"]) if pcs else \
-                    {"ok": True, "bars": 0, "count_by_len": {}, "plan": [], "waste_pct": 0.0, "remnant_mm": 0,
-                     "bought_mm": 0, "used_mm": 0}
-                est = _est_units(out, c, rate, unit_max, None, kind)
-                cnt = {int(k): v for k, v in r["count_by_len"].items()}
-                if est:
-                    cnt[Lmax] = cnt.get(Lmax, 0) + est
-                o[f"u{c}"] = r["bars"] + est
-                o[f"est{c}"] = est
-                o[f"cnt{c}"] = cnt
+                pcs = tuple(sorted((d, _pr_qty(it["q"], rate, c), show_code(it["code"])) for it, d in dims))
+                r = _cut_bars_c(pcs, tuple(s), kerf, trim, cfg["remnant"])
+                o[f"u{c}"] = r["bars"]
+                o[f"cnt{c}"] = {int(k): v for k, v in r["count_by_len"].items()}
                 if c:
                     o["plan"] = r["plan"]
                     o["waste_pct"] = r["waste_pct"]
@@ -1760,77 +1708,76 @@ def pr_cut_options(row, rate, cfg):
                     o["remnant_n"] = sum(1 for b in r["plan"] if b["reusable"])
             o["bought_mm"] = sum(k * v for k, v in o["cnt1"].items())
             o["kg1"] = o["bought_mm"] / 1000 * kg_m
-            o["unit"] = o["kg1"] / o["u1"] if o["u1"] else unit_max
+            o["unit"] = o["kg1"] / o["u1"] if o["u1"] else kg_m * Lmax / 1000
             o["size"] = " + ".join(f"{x:g}mm" for x in s)
             o["breakdown"] = " + ".join(f"{v} cây {k / 1000:g} m" for k, v in sorted(o["cnt1"].items()))
             o["kg0"] = sum(k * v for k, v in o["cnt0"].items()) / 1000 * kg_m
-            o["old"], o["old_size"], o["old_kg"] = old_info(unit_max, o["size"])
             o["cost"] = o["bought_mm"]
             opts.append(o)
     else:
         for W, Lg in cfg["sheets"]:
-            fit = [(it, d) for it, d in good if max(d) <= Lg and min(d) <= W]
-            big = [it for it, d in good if not (max(d) <= Lg and min(d) <= W)]
-            out = big + [it for it, _ in miss]
+            label = f"Khổ {W}×{Lg}"
+            big = sorted({show_code(it["code"]) for it, d in dims if d[0] > Lg or d[1] > W})
+            if big:
+                out["invalid"].append((label, "chi tiết lớn hơn khổ tấm: " + ", ".join(big)))
+                continue
             unit = _unit_kg(grp, std, ref, (Lg, W))
-            o = {"key": f"{W}x{Lg}", "kind": kind, "W": W, "Lg": Lg, "label": f"Khổ {W}×{Lg}",
-                 "est_codes": [show_code(it[0]) for it in out], "too_long": [show_code(it[0]) for it in big]}
+            o = {"key": f"{W}x{Lg}", "kind": kind, "W": W, "Lg": Lg, "label": label, "unit": unit}
             for c in (0, 1):
-                pcs = tuple(sorted((int(math.ceil(max(d))), int(math.ceil(min(d))), qty(it[1], c), show_code(it[0]))
-                                   for it, d in fit))
-                r = _pack_c(pcs, W, Lg, gap) if pcs else {"sheets": [], "too_big": []}
-                est = _est_units(out, c, rate, unit, W * Lg * 1e-6, kind)
-                o[f"u{c}"] = len(r["sheets"]) + est
-                o[f"est{c}"] = est
+                pcs = tuple(sorted((d[0], d[1], _pr_qty(it["q"], rate, c), show_code(it["code"])) for it, d in dims))
+                r = _pack_c(pcs, W, Lg, gap)
+                o[f"u{c}"] = len(r["sheets"])
                 if c:
                     used = sum(a * b for sh in r["sheets"] for (_, _, a, b, _) in sh)
-                    n_sh = len(r["sheets"])
                     o["plan"] = r["sheets"]
-                    o["waste_pct"] = round((1 - used / (n_sh * W * Lg)) * 100, 2) if n_sh else 0.0
+                    o["waste_pct"] = round((1 - used / (o["u1"] * W * Lg)) * 100, 2) if o["u1"] else 0.0
                     o["remnant_mm"], o["remnant_n"] = 0, 0
-            o["unit"] = unit
             o["kg1"] = o["u1"] * unit
+            o["kg0"] = o["u0"] * unit
             o["size"] = f"{W:g} x {Lg:g}mm"
             o["breakdown"] = f"{o['u1']} tấm {W}×{Lg}"
-            o["kg0"] = o["u0"] * unit
-            o["old"], o["old_size"], o["old_kg"] = old_info(unit, o["size"])
             o["cost"] = o["u1"] * W * Lg
             opts.append(o)
-    # Đề xuất: ưu tiên phương án không phải ước lượng, rồi ít vật liệu mua nhất, rồi ít cây/tấm
-    rec = min(opts, key=lambda o: (bool(o["too_long"]), o["cost"], o["u1"]))
-    return {"kind": kind, "options": opts, "rec": rec["key"], "missing": [show_code(it[0]) for it, _ in miss]}
+    if not opts:
+        out["error"] = "Không phương án nào cắt được – " + "; ".join(f"{a}: {b}" for a, b in out["invalid"]) + \
+                       (". Bật cây dài hơn hoặc nối chi tiết" if kind == "bar" else ". Thêm khổ tấm lớn hơn")
+        return out
+    out["options"] = opts
+    out["rec"] = min(opts, key=lambda o: (o["cost"], o["u1"]))["key"]   # ít vật liệu mua nhất, rồi ít cây/tấm
+    return out
 
 
 def pr_effective(rows, cut_opts, choices=None, extras=None):
-    """Số liệu hiệu lực từng dòng PR sau khi chọn phương án: ĐVT, kích thước, (1), (3) theo tối ưu, mua thêm, KL/ĐVT,
-    cột so sánh cách cũ. Dòng không tối ưu được → giữ nguyên cách cũ (thép thì gắn cờ ước lượng)."""
+    """Số liệu hiệu lực từng dòng PR sau khi chọn phương án: ĐVT, kích thước, (1), (3) theo tối ưu, mua thêm, KL/ĐVT.
+    Dòng thép không tính được (thiếu dữ liệu) → error, không có số."""
     out = []
     for i, (r, co) in enumerate(zip(rows, cut_opts)):
         extra = max(0, int((extras or {}).get(i, 0) or 0))
+        base = {"opt": None, "ĐVT": r["ĐVT"], "Kích thước": r["Kích thước"], "unit": r["KL / ĐVT (kg)"],
+                "extra": extra, "Phương án": "", "% phế": None, "Đoạn dư dùng lại": "", "KL tối ưu": None, "error": None}
         if not co:
-            steel = r["Nhóm"] != PR_GROUPS[2]
-            out.append({"opt": None, "ĐVT": r["ĐVT"], "Kích thước": r["Kích thước"], "unit": r["KL / ĐVT (kg)"],
-                        "Cách cũ": r["Cách cũ"] if steel else None, "extra": extra,
-                        "Khổ cách cũ": r["Kích thước"] if steel else "", "KL cách cũ": None, "KL tối ưu": None,
-                        "Phương án": "⚠ Ước lượng – thiếu kích thước chi tiết, giữ cách cũ" if steel else "",
-                        "% phế": None, "Đoạn dư dùng lại": "", "flag": steel})
+            out.append(base)
+            continue
+        if co["error"]:
+            base.update({"ĐVT": "Tấm" if co["kind"] == "sheet" else "Cây", "unit": None,
+                         "Phương án": "❌ " + co["error"], "error": co["error"]})
+            out.append(base)
             continue
         by_key = {o["key"]: o for o in co["options"]}
         o = by_key.get((choices or {}).get(i)) or by_key[co["rec"]]
         txt = o["label"] + (f" ({o['breakdown']})" if o["kind"] == "bar" and len(o["lens"]) > 1 else "")
-        if o["est_codes"]:
-            txt += f" ⚠ ước lượng {o['est1']} {'tấm' if o['kind'] == 'sheet' else 'cây'} theo KL/ghi chú: " + \
-                   ", ".join(dict.fromkeys(o["est_codes"]))
-            if o["too_long"]:
-                txt += " (quá khổ/dài hơn cây)"
         out.append({"opt": o, "ĐVT": "Tấm" if o["kind"] == "sheet" else "Cây", "Kích thước": o["size"], "unit": o["unit"],
-                    "u0": o["u0"], "u1": o["u1"], "Cách cũ": o["old"], "extra": extra, "Phương án": txt,
-                    "Khổ cách cũ": o["old_size"], "KL cách cũ": o["old_kg"], "KL tối ưu": o["kg0"],
+                    "u0": o["u0"], "u1": o["u1"], "extra": extra, "Phương án": txt, "KL tối ưu": o["kg0"],
                     "% phế": o["waste_pct"],
                     "Đoạn dư dùng lại": (f"{o['remnant_n']} đoạn, {o['remnant_mm'] / 1000:,.2f} m"
                                          if o["kind"] == "bar" and o["remnant_n"] else ("0" if o["kind"] == "bar" else "")),
-                    "flag": bool(o["est_codes"])})
+                    "error": None})
     return out
+
+
+def pr_blockers(rows, eff):
+    """Các dòng thép chưa tính được → chặn xuất phiếu PR."""
+    return [f"{r['Tên mặt hàng và quy cách']}: {e['error']}" for r, e in zip(rows, eff) if e["error"]]
 
 
 def pr_cut_all(rows, inputs, cfg):
@@ -1841,15 +1788,19 @@ def pr_cut_all(rows, inputs, cfg):
 
 def pr_compute(rows, inputs, eff=None):
     """Các cột công thức của phiếu PR (giống hệt công thức trong file Excel xuất ra).
-    (1) = số cây/tấm theo tối ưu cắt (thép đủ kích thước) hoặc SL theo BOM; (3) = ROUNDUP((1) × tỷ lệ), riêng dòng tối ưu
-    = số cây/tấm tăng thêm khi cộng contingency vào SỐ CHI TIẾT; (4) = MAX(0, (1) − (2) + (3) + mua thêm) = SL CẦN MUA;
-    KL = SL × KL/ĐVT."""
+    (1) = số cây/tấm theo tối ưu cắt (thép) hoặc SL theo BOM; (3) = ROUNDUP((1) × tỷ lệ), riêng thép = số cây/tấm tăng
+    thêm khi cộng contingency vào SỐ CHI TIẾT; (4) = MAX(0, (1) − (2) + (3) + mua thêm) = SL CẦN MUA; KL = SL × KL/ĐVT.
+    Dòng thép lỗi dữ liệu → None."""
     out = []
     eff = eff or [None] * len(rows)
     for r, inp, e in zip(rows, inputs, eff):
         stock = to_float(inp.get("Số lượng tồn (2)"), 0)
         rate = to_float(inp.get("Tỷ lệ contingency (%)"), 0) / 100
         extra = e["extra"] if e else 0
+        if e and e["error"]:
+            out.append({"(1)": None, "Contingency (3)": None, "Mua thêm": extra, "Số lượng mua (4)": None,
+                        "KL theo SL mua (kg)": None})
+            continue
         if e and e["opt"]:
             q1, q3 = float(e["u0"]), float(e["u1"] - e["u0"])
         else:
@@ -1859,6 +1810,104 @@ def pr_compute(rows, inputs, eff=None):
         unit = e["unit"] if e else r["KL / ĐVT (kg)"]
         out.append({"(1)": q1, "Contingency (3)": q3, "Mua thêm": extra, "Số lượng mua (4)": q4,
                     "KL theo SL mua (kg)": q4 * unit if unit else None})
+    return out
+
+
+# ---- Cấp phát vật tư theo lệnh sản xuất (1 dòng SO = 1 lệnh) từ sơ đồ cắt gộp ----
+def _split_int(lines, n):
+    """Chia n chi tiết (số nguyên) cho các dòng SO theo SL lẻ: phần nguyên trước, phần dư theo phần lẻ lớn nhất."""
+    base = {j: int(math.floor(q + 1e-9)) for j, q in lines.items()}
+    rest = n - sum(base.values())
+    for j in sorted(lines, key=lambda j: (-(lines[j] - base[j]), j))[:max(0, rest)]:
+        base[j] += 1
+    return base
+
+
+def pr_allocate(row, o, rate):
+    """Chia từng cây / tấm của sơ đồ cắt (phương án o, đã gồm contingency) cho các lệnh sản xuất theo phần chiều dài
+    (cây) / diện tích (tấm) mà chi tiết của lệnh đó chiếm trên chính cây / tấm ấy; phế và đoạn dư của cây / tấm chia
+    cùng tỷ lệ → Σ cấp phát mọi lệnh = đúng KL mua theo sơ đồ (o['kg1']). Chi tiết contingency thuộc PR_DP.
+    Trả {"lines": {j: {...}}, "stocks": [...]}."""
+    kind, std = o["kind"], row["_std"]
+    queues, kg_pc = defaultdict(list), {}
+    for it in row["_parts"]:
+        key = (show_code(it["code"]), _pr_piece_dim(kind, std, it["pp"]))
+        kg_pc.setdefault(key, it["pp"]["kg"])
+        n0 = _ceil(it["q"])
+        for j, cnt in sorted(_split_int(it["lines"], n0).items()):
+            if cnt:
+                queues[key].append([j, cnt])
+        dp = _pr_qty(it["q"], rate, 1) - n0
+        if dp:
+            queues[key].append([PR_DP, dp])
+
+    def take(key):
+        q = queues[key]
+        owner = q[0][0]
+        q[0][1] -= 1
+        if not q[0][1]:
+            q.pop(0)
+        return owner
+
+    lines, stocks = {}, []
+
+    def add(j, pieces, net, alloc, rem):
+        a = lines.setdefault(j, {"pieces": 0, "kg_net": 0.0, "kg_alloc": 0.0, "kg_remnant": 0.0})
+        a["pieces"] += pieces
+        a["kg_net"] += net
+        a["kg_alloc"] += alloc
+        a["kg_remnant"] += rem
+
+    plan = o["plan"]
+    for no, st_ in enumerate(plan, 1):
+        if kind == "bar":
+            kg_stock = st_["stock_mm"] / 1000 * o["kg_m"]
+            rem_kg = st_["left_mm"] / 1000 * o["kg_m"] if st_["reusable"] else 0.0
+            pcs = [((lab, ln), ln) for lab, ln in zip(st_["labels"], st_["cuts"])]
+            size, left = f"{st_['stock_mm']:g}", st_["left_mm"]
+        else:
+            kg_stock, rem_kg = o["unit"], 0.0
+            pcs = [((lab, (a, b)), a * b) for (_, _, a, b, lab) in st_]
+            size, left = f"{o['W']}×{o['Lg']}", None
+        tot = sum(w for _, w in pcs) or 1
+        share = defaultdict(lambda: [0, 0.0, 0.0])   # j → [số chi tiết, KL tịnh, trọng số]
+        for key, w in pcs:
+            j = take(key)
+            share[j][0] += 1
+            share[j][1] += kg_pc.get(key, 0.0)
+            share[j][2] += w
+        for j, (n_, net, w) in share.items():
+            add(j, n_, net, kg_stock * w / tot, rem_kg * w / tot)
+        stocks.append({"no": no, "size": size, "kg": kg_stock, "left_mm": left,
+                       "pieces": Counter(lab for (lab, _), _ in pcs),
+                       "dims": Counter(key for key, _ in pcs),
+                       "owners": {j: v[2] / tot for j, v in share.items()}})
+    return {"lines": lines, "stocks": stocks}
+
+
+def pr_allocation_rows(rows, eff, inputs, so_lines):
+    """Bảng cấp phát theo lệnh: mỗi (dòng thép tính được) × (lệnh / dự phòng). KL theo định mức ERP = MRP của dòng SO
+    đó (KL tịnh × hao hụt BOM); KL cấp phát = theo sơ đồ cắt. Chênh lệch = lượng cần điều chỉnh ở Đề nghị xuất."""
+    out = []
+    for r, e, inp in zip(rows, eff, inputs):
+        o = e["opt"]
+        if not o:
+            continue
+        rate = to_float((inp or {}).get("Tỷ lệ contingency (%)"), 0) / 100
+        al = pr_allocate(r, o, rate)
+        unit_txt = f"tấm {o['W']}×{o['Lg']}" if o["kind"] == "sheet" else "m cây"
+        keys = sorted((j for j in al["lines"] if j != PR_DP)) + ([PR_DP] if PR_DP in al["lines"] else [])
+        for j in keys:
+            a = al["lines"][j]
+            out.append({"Vật tư": r["Tên mặt hàng và quy cách"], "Phương án": o["label"],
+                        "Lệnh SX (dòng SO)": pr_line_label(so_lines, j),
+                        "Thành phẩm": "" if j == PR_DP else (so_lines[j]["Tên Thành Phẩm"] or ""),
+                        "SL chi tiết": a["pieces"], "KL tịnh (kg)": a["kg_net"],
+                        "KL theo định mức ERP (kg)": 0.0 if j == PR_DP else r["_mrp_lines"][j],
+                        "KL cấp phát theo sơ đồ cắt (kg)": a["kg_alloc"],
+                        "Quy đổi": a["kg_alloc"] / o["unit"] if o["kind"] == "sheet" else a["kg_alloc"] / o["kg_m"],
+                        "ĐVT quy đổi": unit_txt, "Trong đó đoạn dư (kg)": a["kg_remnant"],
+                        "_rm": r["Mã NVL app"], "_kg_buy": o["kg1"], "_al": al, "_o": o})
     return out
 
 
@@ -2484,14 +2533,16 @@ def count_formulas(xlsx_bytes):
 # =============================================================================
 
 PR_HEADERS = ["STT", "Mã vật tư", "Tên mặt hàng và quy cách", "Kích thước", "Vật liệu / Mác", "ĐVT",
-              "Cách cũ\n(ghi chú KT / quy KL)", "Số cây/tấm theo tối ưu\n(1)", "Phương án", "% phế", "Đoạn dư dùng lại",
+              "Số cây/tấm theo tối ưu\n(1)", "Phương án", "% phế", "Đoạn dư dùng lại",
               "Số lượng tồn\n(2)", "Tỷ lệ\ncontingency", "Contingency\n(3)", "Mua thêm\n(+)",
               "SỐ LƯỢNG CẦN MUA\n(4) = (1) − (2) + (3) + (+)",
               "KL / ĐVT\n(kg/tấm, kg/cây)", "KL theo SL mua\n(kg) = (4) × KL/ĐVT",
               "KL tịnh chi tiết theo BOM (kg)", "Dùng cho", "Ghi chú"]
-PR_WIDTHS = [5, 15, 34, 16, 14, 6, 13, 12, 26, 8, 14, 9, 11, 12, 9, 18, 12, 15, 14, 20, 32]
+PR_WIDTHS = [5, 15, 34, 16, 14, 6, 12, 26, 8, 14, 9, 11, 12, 9, 18, 12, 15, 14, 20, 40]
+PR_SHEETS = ["PR_de_xuat", "Chi_tiet_theo_model", "Chi_tiet_cat", "So_do_cat", "Phieu_cat_gop", "Cap_phat_LSX", "Ghi_chu"]
 GRP_FILL = PatternFill("solid", fgColor="F2F2F2")
 PR_HDR_FILL = PatternFill("solid", fgColor="D9E1F2")
+ERR_FILL = PatternFill("solid", fgColor="FFC7CE")
 
 
 def pr_header_info(res, P, calc):
@@ -2506,16 +2557,28 @@ def pr_header_info(res, P, calc):
             "can_cu": f"{len(calc.get('bom_names') or [])} file BOM: " + ", ".join(fgs)}
 
 
+def pr_stock_owner_text(so_lines, stock):
+    """'#1 FG 60% · #2 FG 40%' – lệnh SX dùng cây / tấm này và tỷ lệ cấp phát."""
+    return " · ".join(f"{pr_line_label(so_lines, j)} {v * 100:.0f}%"
+                      for j, v in sorted(stock["owners"].items(), key=lambda x: (x[0] == PR_DP, str(x[0]))))
+
+
+def pr_stock_pieces_text(kind, stock):
+    if kind == "bar":
+        return "; ".join(f"{lab} {ln:g}×{q}" for (lab, ln), q in stock["dims"].items())
+    return "; ".join(f"{lab} {a:g}×{b:g}×{q}" for (lab, (a, b)), q in stock["dims"].items())
+
+
 def build_pr_excel(base, inputs, res, P, calc, eff=None, cut_cfg=None):
-    """Phiếu PR 5 sheet theo mẫu (PR_de_xuat, Chi_tiet_theo_model, Dinh_muc_cat, So_do_cat, Ghi_chu).
-    Ô vàng = nhập tay (tồn kho, tỷ lệ contingency, mua thêm); cột tính toán là công thức sống.
-    eff = pr_effective(...) (phương án cắt đã chọn); bỏ trống → phương án đề xuất với thông số mặc định."""
+    """Phiếu PR 7 sheet (PR_SHEETS). Ô vàng = nhập tay (tồn kho, tỷ lệ contingency, mua thêm); cột tính toán là công
+    thức sống; ô xanh = kết quả thuật toán cắt. eff = pr_effective(...) (phương án đã chọn); bỏ trống → đề xuất."""
     cut_cfg = pr_cut_cfg(cut_cfg)
     if eff is None:
         eff = pr_effective(base["rows"], pr_cut_all(base["rows"], inputs, cut_cfg))
+    so = res["so_lines"]
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "PR_de_xuat"
+    ws.title = PR_SHEETS[0]
     info = pr_header_info(res, P, calc)
 
     def put(w, r, c, v, fmt=None, fill=None, bold=False, wrap=False, border=True, align=None):
@@ -2534,6 +2597,12 @@ def build_pr_excel(base, inputs, res, P, calc, eff=None, cut_cfg=None):
             cell.alignment = Alignment(wrap_text=wrap, vertical="center", horizontal=align)
         return cell
 
+    def header(w, r, hdr, widths, height=40):
+        for i, (h, wd) in enumerate(zip(hdr, widths), 1):
+            put(w, r, i, h, fill=PR_HDR_FILL, bold=True, wrap=True, align="center")
+            w.column_dimensions[L(i)].width = wd
+        w.row_dimensions[r].height = height
+
     ncol = len(PR_HEADERS)
     last = L(ncol)
     put(ws, 1, 1, "Công ty TNHH Metalic Việt Nam", bold=True, border=False)
@@ -2550,17 +2619,14 @@ def build_pr_excel(base, inputs, res, P, calc, eff=None, cut_cfg=None):
             if isinstance(v, dt.date):
                 cell.number_format = F_DATE
     ws.merge_cells(f"A6:{last}6")
-    c = put(ws, 6, 1, "Ô vàng nhập tay: (2) tồn kho, tỷ lệ contingency, (+) mua thêm. Thép đủ kích thước: "
-                      "(1) = số cây/tấm theo TỐI ƯU CẮT (sơ đồ ở sheet So_do_cat); (3) = số cây/tấm tăng thêm khi cộng "
+    c = put(ws, 6, 1, "Ô vàng nhập tay: (2) tồn kho, tỷ lệ contingency, (+) mua thêm. Thép: (1) = số cây/tấm theo TỐI ƯU CẮT "
+                      "trên kích thước chi tiết (sơ đồ ở sheet So_do_cat / Phieu_cat_gop); (3) = số cây/tấm tăng thêm khi cộng "
                       "contingency vào số chi tiết (ô xanh – đổi tỷ lệ trong Excel không tối ưu lại, hãy tính lại trên app). "
-                      "Dòng khác: (3) = ROUNDUP((1) × tỷ lệ). (4) = (1) − (2) + (3) + (+) = SỐ LƯỢNG CẦN MUA.",
-            border=False, wrap=True)
+                      "Vật tư khác: (3) = ROUNDUP((1) × tỷ lệ). (4) = (1) − (2) + (3) + (+) = SỐ LƯỢNG CẦN MUA. "
+                      "Cấp phát cho từng lệnh sản xuất: sheet Cap_phat_LSX.", border=False, wrap=True)
     c.font = Font(italic=True, color="595959")
     ws.row_dimensions[6].height = 45
-    for i, h in enumerate(PR_HEADERS, 1):
-        put(ws, 8, i, h, fill=PR_HDR_FILL, bold=True, wrap=True, align="center")
-        ws.column_dimensions[L(i)].width = PR_WIDTHS[i - 1]
-    ws.row_dimensions[8].height = 48
+    header(ws, 8, PR_HEADERS, PR_WIDTHS, 48)
     r, stt, cur, first = 9, 0, None, 9
     for row, inp, e in zip(base["rows"], inputs, eff):
         if row["Nhóm"] != cur:
@@ -2569,55 +2635,56 @@ def build_pr_excel(base, inputs, res, P, calc, eff=None, cut_cfg=None):
             put(ws, r, 1, cur, fill=GRP_FILL, bold=True)
             r += 1
         stt += 1
+        opt, err = e["opt"], e["error"]
         put(ws, r, 1, stt, align="center")
         put(ws, r, 2, row["Mã vật tư"], wrap=True)
         put(ws, r, 3, row["Tên mặt hàng và quy cách"], wrap=True)
         put(ws, r, 4, e["Kích thước"])
         put(ws, r, 5, row["Vật liệu / Mác"], wrap=True)
         put(ws, r, 6, e["ĐVT"], align="center")
-        put(ws, r, 7, e["Cách cũ"], "#,##0.##")
-        opt = e["opt"]
-        put(ws, r, 8, opt["u0"] if opt else row["Số lượng theo BOM (1)"], "#,##0.##", fill=NORM_FILL)
-        put(ws, r, 9, e["Phương án"], wrap=True)
-        put(ws, r, 10, None if e["% phế"] is None else e["% phế"] / 100, F_PCT)
-        put(ws, r, 11, e["Đoạn dư dùng lại"])
+        put(ws, r, 7, None if err else (opt["u0"] if opt else row["Số lượng theo BOM (1)"]), "#,##0.##",
+            fill=ERR_FILL if err else NORM_FILL)
+        put(ws, r, 8, e["Phương án"], wrap=True, fill=ERR_FILL if err else None)
+        put(ws, r, 9, None if e["% phế"] is None else e["% phế"] / 100, F_PCT)
+        put(ws, r, 10, e["Đoạn dư dùng lại"])
         stock = inp.get("Số lượng tồn (2)")
-        put(ws, r, 12, None if is_blank(stock) else to_float(stock), "#,##0.##", fill=INP_FILL)
+        put(ws, r, 11, None if is_blank(stock) else to_float(stock), "#,##0.##", fill=INP_FILL)
         rate = inp.get("Tỷ lệ contingency (%)")
-        put(ws, r, 13, None if is_blank(rate) else to_float(rate) / 100, F_PCT, fill=INP_FILL)
+        put(ws, r, 12, None if is_blank(rate) else to_float(rate) / 100, F_PCT, fill=INP_FILL)
         if opt:  # số cây/tấm tăng thêm khi cộng contingency vào số chi tiết – kết quả tối ưu, không viết được thành công thức
-            put(ws, r, 14, opt["u1"] - opt["u0"], "#,##0", fill=NORM_FILL)
+            put(ws, r, 13, opt["u1"] - opt["u0"], "#,##0", fill=NORM_FILL)
+        elif err:
+            put(ws, r, 13, None, fill=ERR_FILL)
         else:
-            put(ws, r, 14, f"=ROUNDUP(H{r}*N(M{r}),0)", "#,##0")
-        put(ws, r, 15, e["extra"] or None, "#,##0", fill=INP_FILL)
-        put(ws, r, 16, f"=MAX(0,H{r}-N(L{r})+N{r}+N(O{r}))", "#,##0.##", bold=True)
-        put(ws, r, 17, e["unit"], "#,##0.000", fill=NORM_FILL if e["unit"] else None)
-        put(ws, r, 18, f'=IF(Q{r}="","",P{r}*Q{r})', "#,##0.0")
-        put(ws, r, 19, row["KL tịnh theo BOM (kg)"], "#,##0.0", fill=NORM_FILL if row["KL tịnh theo BOM (kg)"] else None)
-        put(ws, r, 20, None)  # Dùng cho – để trống theo yêu cầu
-        if opt and e["KL cách cũ"] is not None:
-            note = (f"Tối ưu cắt (xem So_do_cat): (1) = {opt['u0']} {e['ĐVT'].lower()} {e['Kích thước']} = {e['KL tối ưu']:,.1f} kg. "
-                    f"Cách cũ: {e['Cách cũ']:,.0f} × {e['Khổ cách cũ']} = {e['KL cách cũ']:,.1f} kg "
-                    f"(chênh {e['KL tối ưu'] - e['KL cách cũ']:+,.1f} kg)")
+            put(ws, r, 13, f"=ROUNDUP(G{r}*N(L{r}),0)", "#,##0")
+        put(ws, r, 14, e["extra"] or None, "#,##0", fill=INP_FILL)
+        put(ws, r, 15, f'=IF(G{r}="","",MAX(0,G{r}-N(K{r})+N(M{r})+N(N{r})))', "#,##0.##", bold=True)
+        put(ws, r, 16, e["unit"], "#,##0.000", fill=NORM_FILL if e["unit"] else None)
+        put(ws, r, 17, f'=IF(OR(O{r}="",P{r}=""),"",O{r}*P{r})', "#,##0.0")
+        put(ws, r, 18, row["KL tịnh theo BOM (kg)"], "#,##0.0", fill=NORM_FILL if row["KL tịnh theo BOM (kg)"] else None)
+        put(ws, r, 19, None)  # Dùng cho – để trống theo yêu cầu
+        if opt:
+            note = (f"Tối ưu cắt: (1) = {opt['u0']} {e['ĐVT'].lower()} {e['Kích thước']} = {e['KL tối ưu']:,.1f} kg. "
+                    "Sơ đồ: So_do_cat / Phieu_cat_gop; cấp phát: Cap_phat_LSX")
         else:
-            note = "Tối ưu cắt – xem sheet So_do_cat" if opt else row["Ghi chú"]
-        put(ws, r, 21, note, wrap=True)
+            note = ("Chưa tính được – bổ sung kích thước chi tiết trong BOM (xem Chi_tiet_cat)" if err else row["Ghi chú"])
+        put(ws, r, 20, note, wrap=True)
         r += 1
     last_data = r - 1
     r += 1
     put(ws, r, 3, "Tổng KL thép (kg)", bold=True)
-    for col in (18, 19):
+    for col in (17, 18):
         put(ws, r, col, f"=SUM({L(col)}{first}:{L(col)}{last_data})", "#,##0.0", fill=TOT_FILL, bold=True)
     r += 2
-    for col, label in ((2, "Đề nghị bởi"), (4, "Trưởng bộ phận"), (9, "Bộ phận chất lượng"), (15, "Bộ phận kế hoạch"),
-                       (18, "Ban Giám đốc")):
+    for col, label in ((2, "Đề nghị bởi"), (4, "Trưởng bộ phận"), (8, "Bộ phận chất lượng"), (14, "Bộ phận kế hoạch"),
+                       (17, "Ban Giám đốc")):
         put(ws, r, col, label, bold=True, border=False)
         put(ws, r + 5, col, "......./…./20…", border=False)
     from openpyxl.worksheet.datavalidation import DataValidation
     dv = DataValidation(type="decimal", operator="greaterThanOrEqual", formula1="0", allow_blank=True)
     ws.add_data_validation(dv)
-    dv.add(f"M{first}:M{last_data}")
-    dv.add(f"O{first}:O{last_data}")
+    dv.add(f"L{first}:L{last_data}")
+    dv.add(f"N{first}:N{last_data}")
     ws.freeze_panes = "D9"
     ws.print_title_rows = "8:8"
     ws.page_setup.orientation = "landscape"
@@ -2626,14 +2693,10 @@ def build_pr_excel(base, inputs, res, P, calc, eff=None, cut_cfg=None):
     ws.sheet_properties.pageSetUpPr.fitToPage = True
 
     # ---- Chi tiết theo model ----
-    so = res["so_lines"]
-    w2 = wb.create_sheet("Chi_tiet_theo_model")
+    w2 = wb.create_sheet(PR_SHEETS[1])
     hdr = ["Vật tư", "ĐVT"] + [f"{l['Tên Thành Phẩm'] or ''} – {l['Mã Sản Phẩm ERP']}".strip(" –") for l in so] + \
           [f"Tổng {sum(l['Số Lượng'] for l in so):,.0f} SP", "Ghi chú"]
-    for i, h in enumerate(hdr, 1):
-        put(w2, 1, i, h, fill=PR_HDR_FILL, bold=True, wrap=True, align="center")
-        w2.column_dimensions[L(i)].width = 40 if i == 1 else (8 if i == 2 else (14 if i <= 2 + len(so) + 1 else 36))
-    w2.row_dimensions[1].height = 45
+    header(w2, 1, hdr, [40, 8] + [14] * (len(so) + 1) + [36], 45)
     for k, m in enumerate(base["model"], 2):
         put(w2, k, 1, m["Vật tư"], wrap=True)
         put(w2, k, 2, m["ĐVT"], align="center")
@@ -2644,71 +2707,27 @@ def build_pr_excel(base, inputs, res, P, calc, eff=None, cut_cfg=None):
         put(w2, k, tc + 1, m["Ghi chú"], wrap=True)
     w2.freeze_panes = "C2"
 
-    # ---- Định mức cắt ----
-    w3 = wb.create_sheet("Dinh_muc_cat")
-    cut_hdr = ["Vật tư", "Khổ phôi", "Mã chi tiết", "Tên chi tiết", "SL chi tiết", "Định mức theo BOM",
-               "Tấm / cây cần", "KL tịnh (kg)"]
-    for i, (h, wd) in enumerate(zip(cut_hdr, [44, 16, 16, 30, 12, 28, 14, 14]), 1):
-        put(w3, 1, i, h, fill=PR_HDR_FILL, bold=True, wrap=True, align="center")
-        w3.column_dimensions[L(i)].width = wd
+    # ---- Chi tiết cắt (đầu vào thuật toán: kích thước + SL từng chi tiết) ----
+    w3 = wb.create_sheet(PR_SHEETS[2])
+    cut_hdr = ["Vật tư", "Mã chi tiết", "Tên chi tiết", "Dày", "Rộng", "Rộng B", "Dài", "SL chi tiết",
+               "KL / chi tiết (kg)", "KL tịnh (kg)", "Trạng thái"]
+    header(w3, 1, cut_hdr, [36, 16, 30, 8, 8, 8, 9, 11, 12, 12, 40])
     for k, cr in enumerate(base["cut"], 2):
-        is_sum = cr.get("_sum")
-        vals = [cr["Vật tư"], cr["Khổ phôi"], cr["Mã chi tiết"], cr["Tên chi tiết"], cr["SL chi tiết"],
-                cr["Định mức theo BOM"], cr["Tấm / cây cần"], cr["KL tịnh (kg)"]]
-        fmts = [None, None, None, None, "#,##0.##", None, "#,##0" if is_sum else "#,##0.000", "#,##0.0"]
-        for i, (v, f) in enumerate(zip(vals, fmts), 1):
-            put(w3, k, i, v, f, fill=GRP_FILL if is_sum else None, bold=bool(is_sum))
+        bad = cr["Trạng thái"].startswith("❌")
+        for i, h in enumerate(cut_hdr, 1):
+            fmt = "#,##0.###" if i in (4, 5, 6, 7, 9) else ("#,##0.##" if i in (8, 10) else None)
+            put(w3, k, i, cr[h], fmt, fill=ERR_FILL if bad and i == 11 else None)
     w3.freeze_panes = "A2"
 
-    # ---- Ghi chú ----
-    w4 = wb.create_sheet("Ghi_chu")
-    notes = [
-        ("Nguồn số liệu", f"SO: {calc.get('so_name', '')}. BOM: {', '.join(calc.get('bom_names') or [])}. "
-                          "Nhu cầu NVL lấy từ kết quả MRP của app (cùng số liệu tab Hoạch định MRP)."),
-        ("Cách cũ (so sánh) / sheet Dinh_muc_cat", "Thép tấm / lap: quy ra tấm / cây theo định mức cắt ghi ở cột GHI CHÚ của BOM. "
-                                  "Chi tiết ghi 'được N pcs/1 tấm' hoặc '1 cây … cắt được N pcs' làm tròn lên theo từng "
-                                  "chi tiết; chi tiết ghi '1m2 được N pcs', chi tiết không ghi định mức và phần hao hụt "
-                                  "được cộng dồn rồi làm tròn lên. Vật tư khác = nhu cầu MRP."),
-        ("Khổ phôi", "Lấy từ GHI CHÚ của BOM; loại thép tấm không ghi khổ dùng khổ phổ biến nhất trong BOM. "
-                     "KL / ĐVT = khổ × dày (hoặc tiết diện × chiều dài cây) × khối lượng riêng (mặc định 7,85)."),
-        ("Contingency", "Nhập tay ở cột 'Tỷ lệ contingency' (ô vàng). Thép tối ưu cắt: áp vào SỐ CHI TIẾT trước khi tối ưu "
-                        "(ROUNDUP(SL chi tiết × tỷ lệ)); (3) = số cây/tấm tăng thêm so với (1)."),
-        ("Tối ưu cắt", "Thép tấm / cây có đủ kích thước chi tiết (Dày, Rộng, Dài; hộp thêm Rộng B): (1) = số cây/tấm theo "
-                       "sơ đồ cắt thật (mỗi đoạn được xếp vào 1 cây/tấm cụ thể, có mạch cưa / khe cắt) – không chia tổng mét "
-                       "hay tổng kg nên không mua thiếu. Cây: chọn mẫu cắt ít phế nhất rồi lặp; tấm: xếp theo kệ, cho xoay "
-                       "90°. Cột 'Cách cũ' = định mức GHI CHÚ của kỹ thuật hoặc quy KL ÷ KL 1 cây/tấm, chỉ để so sánh. "
-                       "Chi tiết thiếu kích thước hoặc quá khổ phôi: giữ cách cũ, gắn cờ ⚠ ước lượng. Hao hụt % của MRP "
-                       "không cộng thêm vào số cây/tấm (phế thực tế đã nằm trong sơ đồ cắt). Thông số: "
-                       f"cây {', '.join(f'{x:g}' for x in cut_cfg['bars'])} mm; khổ tấm "
-                       f"{', '.join(f'{a}×{b}' for a, b in cut_cfg['sheets'])}; mạch cưa {cut_cfg['kerf']} mm, bỏ đầu cây "
-                       f"{cut_cfg['trim']} mm, đoạn dư dùng lại ≥ {cut_cfg['remnant']} mm, khe cắt tấm {cut_cfg['gap']} mm."),
-        ("Mua thêm (+)", "Nhập tay ở app hoặc ô vàng: số cây/tấm mua thêm ngoài mức đủ (chỉ cộng, không trừ)."),
-        ("Vật tư mua ngoài trùng tên", "Các mã khác nhau nhưng cùng tên + ĐVT (VD mã đóng gói riêng từng thành phẩm) "
-                                       "được gộp 1 dòng; cột 'Mã vật tư' liệt kê các mã."),
-    ]
-    for w in res["warnings"]:
-        if w.startswith("⚠️"):
-            notes.append(("Cảnh báo dữ liệu", w.lstrip("⚠️ ").strip()))
-    if res.get("variant_codes"):
-        notes.append(("Mã dùng chung khác định mức", "Đã tính riêng theo từng thành phẩm: " + ", ".join(res["variant_codes"])))
-    put(w4, 1, 1, "Hạng mục", fill=PR_HDR_FILL, bold=True)
-    put(w4, 1, 2, "Nội dung", fill=PR_HDR_FILL, bold=True)
-    w4.column_dimensions["A"].width, w4.column_dimensions["B"].width = 30, 120
-    for k, (a, b2) in enumerate(notes, 2):
-        put(w4, k, 1, a, bold=True)
-        put(w4, k, 2, b2, wrap=True)
-
-    # ---- Sơ đồ cắt (tối ưu cắt) ----
-    w5 = wb.create_sheet("So_do_cat")
+    # ---- Sơ đồ cắt (gộp các cây / tấm giống nhau) ----
+    w5 = wb.create_sheet(PR_SHEETS[3])
     put(w5, 1, 1, f"Mạch cưa {cut_cfg['kerf']} mm · bỏ đầu cây {cut_cfg['trim']} mm · đoạn dư ≥ {cut_cfg['remnant']} mm "
                   f"coi là dùng lại · khe cắt tấm {cut_cfg['gap']} mm. Sơ đồ tính cho số chi tiết ĐÃ cộng contingency "
-                  "(= (1) + (3)); chưa gồm mua thêm (+) và chưa trừ tồn kho.", border=False)
+                  "(= (1) + (3)), gộp mọi thành phẩm / đơn hàng; chưa gồm mua thêm (+) và chưa trừ tồn kho.", border=False)
     w5["A1"].font = Font(italic=True, color="595959")
     hdr5 = ["Vật tư", "Phương án", "Phôi (mm)", "Cây / tấm số", "SL giống nhau", "Các đoạn / chi tiết cắt ra (mã dài×SL)",
             "Dùng", "Dư mỗi cây (mm)", "Đoạn dư"]
-    for i, (h, wd) in enumerate(zip(hdr5, [34, 22, 13, 12, 10, 70, 12, 12, 12]), 1):
-        put(w5, 3, i, h, fill=PR_HDR_FILL, bold=True, wrap=True, align="center")
-        w5.column_dimensions[L(i)].width = wd
+    header(w5, 3, hdr5, [34, 22, 13, 12, 10, 70, 12, 12, 12])
     k = 4
     for row, e in zip(base["rows"], eff):
         o = e["opt"]
@@ -2726,15 +2745,115 @@ def build_pr_excel(base, inputs, res, P, calc, eff=None, cut_cfg=None):
             for i, v in enumerate(vals, 1):
                 put(w5, k, i, v, F_PCT if i == 7 else ("#,##0" if i in (5, 8) else None), wrap=(i == 6))
             k += 1
-        if o["est1"]:
-            put(w5, k, 1, row["Tên mặt hàng và quy cách"])
-            put(w5, k, 2, "⚠ Ước lượng")
-            put(w5, k, 5, o["est1"], "#,##0")
-            put(w5, k, 6, "Chi tiết thiếu kích thước / quá khổ phôi – tính theo cách cũ (ghi chú KT hoặc quy KL): "
-                          + ", ".join(dict.fromkeys(o["est_codes"])), wrap=True)
-            k += 1
         k += 1
     w5.freeze_panes = "A4"
+
+    # ---- Phiếu cắt gộp: từng cây / tấm, chi tiết cắt ra, thuộc lệnh SX nào ----
+    alloc = pr_allocation_rows(base["rows"], eff, inputs, so)
+    w6 = wb.create_sheet(PR_SHEETS[4])
+    put(w6, 1, 1, "PHIẾU CẮT GỘP – 1 phiếu cho nhiều lệnh sản xuất (Thẻ giao việc công đoạn CẮT). Kho cấp NGUYÊN cây / tấm "
+                  "theo phiếu này (Chuyển nội bộ Kho NVL → Kho sản xuất); cột 'Thuộc lệnh' = tỷ lệ chiều dài / diện tích "
+                  "chi tiết của từng lệnh trên cây / tấm đó (dùng để chia KL xuất tiêu hao).", border=False)
+    w6["A1"].font = Font(italic=True, color="595959")
+    hdr6 = ["Vật tư", "Phôi số", "Phôi (mm)", "KL phôi (kg)", "Chi tiết cắt ra (mã kích thước×SL)", "Thuộc lệnh (tỷ lệ)",
+            "Dư (mm)"]
+    header(w6, 3, hdr6, [30, 8, 12, 12, 60, 60, 10])
+    k, done = 4, set()
+    for a in alloc:
+        if a["_rm"] in done:
+            continue
+        done.add(a["_rm"])
+        o, al = a["_o"], a["_al"]
+        w6.merge_cells(f"A{k}:G{k}")
+        put(w6, k, 1, f"{a['Vật tư']} – {o['label']}: {o['u1']} {'tấm' if o['kind'] == 'sheet' else 'cây'} "
+                      f"({o['breakdown']}), {o['kg1']:,.1f} kg", fill=GRP_FILL, bold=True)
+        k += 1
+        for s in al["stocks"]:
+            vals = [a["Vật tư"], s["no"], s["size"], s["kg"], pr_stock_pieces_text(o["kind"], s),
+                    pr_stock_owner_text(so, s), s["left_mm"]]
+            for i, v in enumerate(vals, 1):
+                put(w6, k, i, v, "#,##0.00" if i == 4 else ("#,##0" if i in (2, 7) else None), wrap=i in (5, 6))
+            k += 1
+        k += 1
+    w6.freeze_panes = "A4"
+
+    # ---- Cấp phát theo lệnh SX ----
+    w7 = wb.create_sheet(PR_SHEETS[5])
+    put(w7, 1, 1, "CẤP PHÁT THÉP THEO LỆNH SẢN XUẤT (1 dòng SO = 1 lệnh). KL cấp phát = phần chiều dài / diện tích chi tiết "
+                  "của lệnh trên từng cây / tấm × KL cây / tấm (phế và đoạn dư chia cùng tỷ lệ) → tổng = KL mua theo sơ đồ cắt. "
+                  "Nhập cột G vào Đề nghị xuất VTSX / Xuất tiêu hao của từng lệnh; cột H = phần chênh so với định mức ERP.",
+        border=False)
+    w7["A1"].font = Font(italic=True, color="595959")
+    hdr7 = ["Vật tư", "Lệnh SX (dòng SO)", "Thành phẩm", "SL chi tiết", "KL tịnh (kg)", "KL theo định mức ERP (kg)",
+            "KL cấp phát theo sơ đồ cắt (kg)", "Chênh lệch (kg) = G − F", "% hao hụt cắt = 1 − E/G",
+            "KL / ĐVT quy đổi (kg)", "Quy đổi = G / J", "ĐVT quy đổi", "Trong đó đoạn dư (kg)"]
+    header(w7, 3, hdr7, [30, 26, 26, 10, 12, 14, 16, 14, 12, 12, 12, 16, 12], 48)
+    k = 4
+    groups = {}
+    for a in alloc:
+        groups.setdefault(a["_rm"], []).append(a)
+    for rm, lst in groups.items():
+        o = lst[0]["_o"]
+        unit = o["unit"] if o["kind"] == "sheet" else o["kg_m"]
+        k0 = k
+        for a in lst:
+            vals = {1: a["Vật tư"], 2: a["Lệnh SX (dòng SO)"], 3: a["Thành phẩm"], 4: a["SL chi tiết"],
+                    5: a["KL tịnh (kg)"], 6: a["KL theo định mức ERP (kg)"], 7: a["KL cấp phát theo sơ đồ cắt (kg)"],
+                    10: unit, 12: a["ĐVT quy đổi"], 13: a["Trong đó đoạn dư (kg)"]}
+            for col, v in vals.items():
+                put(w7, k, col, v, "#,##0" if col == 4 else ("#,##0.000" if col == 10 else ("#,##0.00" if col > 4 else None)),
+                    fill=NORM_FILL if col in (7, 10, 13) else None, wrap=col in (2, 3))
+            put(w7, k, 8, f"=G{k}-F{k}", "#,##0.00")
+            put(w7, k, 9, f'=IF(G{k}=0,"",1-E{k}/G{k})', F_PCT)
+            put(w7, k, 11, f'=IF(J{k}=0,"",G{k}/J{k})', "#,##0.000")
+            k += 1
+        put(w7, k, 1, f"Cộng {lst[0]['Vật tư']}", bold=True, fill=TOT_FILL)
+        for col in (4, 5, 6, 7, 13):
+            put(w7, k, col, f"=SUM({L(col)}{k0}:{L(col)}{k - 1})", "#,##0" if col == 4 else "#,##0.00", bold=True, fill=TOT_FILL)
+        put(w7, k, 8, f"=G{k}-F{k}", "#,##0.00", bold=True, fill=TOT_FILL)
+        put(w7, k, 9, f'=IF(G{k}=0,"",1-E{k}/G{k})', F_PCT, bold=True, fill=TOT_FILL)
+        k += 1
+        put(w7, k, 1, f"KL mua theo sơ đồ cắt ({o['breakdown']})")
+        put(w7, k, 7, o["kg1"], "#,##0.00", fill=NORM_FILL)
+        put(w7, k, 8, "Kiểm tra (= 0)")
+        put(w7, k, 9, f"=ROUND(G{k - 1}-G{k},3)", "#,##0.000", bold=True)
+        k += 2
+    w7.freeze_panes = "C4"
+
+    # ---- Ghi chú ----
+    w4 = wb.create_sheet(PR_SHEETS[6])
+    notes = [
+        ("Nguồn số liệu", f"SO: {calc.get('so_name', '')}. BOM: {', '.join(calc.get('bom_names') or [])}. "
+                          "Nhu cầu NVL lấy từ kết quả MRP của app (cùng số liệu tab Hoạch định MRP)."),
+        ("Quy đổi kg → tấm / cây", "Chỉ bằng thuật toán tối ưu cắt trên kích thước chi tiết của BOM (Dày, Rộng, Dài; hộp "
+                                   "thêm Rộng B; ống thêm Dày) – KHÔNG dùng GHI CHÚ, KHÔNG ước lượng. Chi tiết thiếu kích "
+                                   "thước / quá khổ → dòng báo lỗi, chưa có số (sheet Chi_tiet_cat)."),
+        ("Tối ưu cắt", "Cây: bài toán cắt cây (chọn mẫu cắt ít phế nhất bằng xếp ba lô có giới hạn rồi lặp). Tấm: xếp chữ nhật "
+                       "theo kệ (FFDH), cho xoay 90°, có khe cắt. Mọi thành phẩm / đơn hàng dùng chung 1 sơ đồ. Mỗi chi tiết "
+                       "được xếp vào 1 cây / tấm cụ thể nên không mua thiếu. Hao hụt % của MRP không cộng thêm. Thông số: "
+                       f"cây {', '.join(f'{x:g}' for x in cut_cfg['bars'])} mm; khổ tấm "
+                       f"{', '.join(f'{a}×{b}' for a, b in cut_cfg['sheets'])}; mạch cưa {cut_cfg['kerf']} mm, bỏ đầu cây "
+                       f"{cut_cfg['trim']} mm, đoạn dư dùng lại ≥ {cut_cfg['remnant']} mm, khe cắt tấm {cut_cfg['gap']} mm."),
+        ("KL / ĐVT", "KL 1 tấm = khổ × dày × khối lượng riêng (mặc định 7,85); 1 cây = tiết diện × chiều dài × khối lượng riêng."),
+        ("Contingency", "Nhập tay (ô vàng). Thép: áp vào SỐ CHI TIẾT (ROUNDUP(SL × tỷ lệ)) rồi tối ưu lại; (3) = số cây/tấm "
+                        "tăng thêm. Chi tiết dự phòng thuộc dòng 'Dự phòng (contingency)' trong Cap_phat_LSX."),
+        ("Cấp phát theo lệnh SX", "Sheet Cap_phat_LSX: mỗi cây / tấm chia cho các lệnh theo phần chiều dài / diện tích chi tiết "
+                                  "của lệnh trên chính cây / tấm đó; tổng cấp phát = KL mua theo sơ đồ (ô Kiểm tra = 0). "
+                                  "Trên ExpertERP: Chuyển nội bộ cấp NGUYÊN cây / tấm theo Phieu_cat_gop; Xuất tiêu hao "
+                                  "từng lệnh theo cột G. Mua thêm (+) và tồn kho không nằm trong cấp phát."),
+        ("Mua thêm (+)", "Nhập tay ở app hoặc ô vàng: số cây/tấm mua thêm ngoài mức đủ (chỉ cộng, không trừ)."),
+        ("Vật tư mua ngoài trùng tên", "Các mã khác nhau nhưng cùng tên + ĐVT (VD mã đóng gói riêng từng thành phẩm) "
+                                       "được gộp 1 dòng; cột 'Mã vật tư' liệt kê các mã."),
+    ]
+    for w in res["warnings"]:
+        if w.startswith("⚠️"):
+            notes.append(("Cảnh báo dữ liệu", w.lstrip("⚠️ ").strip()))
+    if res.get("variant_codes"):
+        notes.append(("Mã dùng chung khác định mức", "Đã tính riêng theo từng thành phẩm: " + ", ".join(res["variant_codes"])))
+    header(w4, 1, ["Hạng mục", "Nội dung"], [30, 120], 20)
+    for k, (a, b2) in enumerate(notes, 2):
+        put(w4, k, 1, a, bold=True)
+        put(w4, k, 2, b2, wrap=True)
     wb.calculation.fullCalcOnLoad = True
     bio = io.BytesIO()
     wb.save(bio)
@@ -2854,41 +2973,21 @@ def render_tree(res, fg, max_rows=3000):
     return pd.DataFrame(out)
 
 
-def pr_cut_defaults(suggest):
-    """Danh mục khởi đầu: khổ tấm / chiều dài cây có trong GHI CHÚ BOM → bật; mặc định còn lại → tắt (thêm được, bật lại được).
-    BOM không ghi khổ nào thì dùng mặc định như cũ."""
-    sg = suggest or {}
-    sheets = [(a, b, True) for a, b in sg.get("sheets", [])]
-    bars = [(L, True) for L in sg.get("bars", [])]
-    if sheets:
-        sheets += [(a, b, False) for a, b, _ in PR_CUT_DEFAULT["sheets"]
-                   if tuple(sorted((a, b))) not in {tuple(sorted((x, y))) for x, y, _ in sheets}]
-    else:
-        sheets = list(PR_CUT_DEFAULT["sheets"])
-    if bars:
-        bars += [(L, False) for L, _ in PR_CUT_DEFAULT["bars"] if L not in {x for x, _ in bars}]
-    else:
-        bars = list(PR_CUT_DEFAULT["bars"])
-    return bars, sheets
-
-
-def pr_cut_settings(suggest=None, sig=""):
-    """Danh mục chiều dài cây / khổ tấm và thông số cắt (sửa được trên giao diện). Trả cfg cho pr_cut_options."""
-    d_bars, d_sheets = pr_cut_defaults(suggest)
+def pr_cut_settings(sig=""):
+    """Danh mục chiều dài cây / khổ tấm và thông số cắt (sửa được trên giao diện). Trả cfg cho pr_cut_options.
+    Danh mục khởi đầu = PR_CUT_DEFAULT (không lấy từ GHI CHÚ BOM)."""
     with st.expander("✂️ Tối ưu cắt – danh mục cây, khổ tấm và thông số cắt", expanded=False):
         st.markdown("| Bảng | Dùng cho | Nhập gì |\n|---|---|---|\n"
                     "| **Bên trái – Cây** | Thép **cây**: tròn đặc, ống, hộp, lap | Chiều dài 1 cây nhà cung cấp bán (mm), VD 6000 |\n"
                     "| **Bên phải – Tấm** | Thép **tấm** | Khổ 1 tấm: Rộng × Dài (mm), VD 1250 × 3000 |")
-        if suggest and (suggest.get("sheets") or suggest.get("bars")):
-            st.caption("Đã bật sẵn các khổ / chiều dài ghi trong GHI CHÚ của BOM; khổ mặc định còn lại để tắt, tick \"Dùng\" nếu muốn xét thêm.")
-        st.caption("Bật/tắt hoặc thêm dòng. Phương án cây: từng chiều dài được bật + trộn các chiều dài được bật. "
-                   "Phương án tấm: từng khổ được bật.")
+        st.caption("Bật/tắt hoặc thêm dòng theo khổ / chiều dài nhà cung cấp đang bán. Phương án cây: từng chiều dài được "
+                   "bật + trộn các chiều dài được bật. Phương án tấm: từng khổ được bật.")
         c1, c2 = st.columns(2)
-        bars = c1.data_editor(pd.DataFrame([{"Chiều dài cây (mm)": float(L), "Dùng": on} for L, on in d_bars]),
+        bars = c1.data_editor(pd.DataFrame([{"Chiều dài cây (mm)": float(L), "Dùng": on} for L, on in PR_CUT_DEFAULT["bars"]]),
                               key=f"pr_cut_bars_{sig}", hide_index=True, num_rows="dynamic", width="stretch",
                               column_config={"Chiều dài cây (mm)": NUMCFG(min_value=100, step=100, format="%d")})
         sheets = c2.data_editor(pd.DataFrame([{"Rộng (mm)": float(a), "Dài (mm)": float(b), "Dùng": on}
-                                              for a, b, on in d_sheets]),
+                                              for a, b, on in PR_CUT_DEFAULT["sheets"]]),
                                 key=f"pr_cut_sheets_{sig}", hide_index=True, num_rows="dynamic", width="stretch",
                                 column_config={"Rộng (mm)": NUMCFG(min_value=100, step=50, format="%d"),
                                                "Dài (mm)": NUMCFG(min_value=100, step=50, format="%d")})
@@ -2947,9 +3046,10 @@ def pr_plan_rows(o, cfg):
 
 def render_pr_tab(res, P, calc):
     """Tab Đề xuất mua hàng (PR): nhập tay tồn kho / tỷ lệ contingency → bảng SỐ LƯỢNG CẦN MUA tự cập nhật →
-    chọn phương án cắt, mua thêm, xem sơ đồ → tải Excel. Chỉ đọc kết quả MRP; không thay đổi MRP hay Excel Master."""
+    chọn phương án cắt, mua thêm, xem sơ đồ → cấp phát theo lệnh SX → tải Excel. Chỉ đọc kết quả MRP."""
     base = build_pr_base(res)
     rows = base["rows"]
+    so_lines = res["so_lines"]
     if not rows:
         st.info("Chưa có vật tư nào trong MRP.")
         return
@@ -2959,34 +3059,33 @@ def render_pr_tab(res, P, calc):
     if k_in not in st.session_state:
         st.session_state[k_in] = pd.DataFrame({c: [None] * len(rows) for c in PR_INPUT_COLS}, dtype="float64")
         st.session_state[k_ver] = 0
-    cfg = pr_cut_settings(base.get("suggest"), sig)
+    cfg = pr_cut_settings(sig)
     ch_key = lambda i: f"pr_ch_{sig}_{i}"  # noqa: E731
     ex_key = lambda i: f"pr_ex_{sig}_{i}"  # noqa: E731
     choices = {i: st.session_state.get(ch_key(i)) for i in range(len(rows))}
     extras = {i: st.session_state.get(ex_key(i), 0) for i in range(len(rows))}
     eff0 = pr_effective(rows, pr_cut_all(rows, [{}] * len(rows), cfg), choices, extras)
     st.caption("Nhập **tồn kho (2)** và **tỷ lệ contingency** (để trống = 0) → bảng **SỐ LƯỢNG CẦN MUA (4)** bên dưới tự cập nhật. "
-               "**(1) = số tấm / cây cần theo tối ưu cắt, chưa tính tồn kho và contingency** (vật tư khác: SL theo BOM). "
-               "**(4) = (1) − (2) + (3) + mua thêm.** Cột *Cách cũ* (ghi chú KT / quy KL) để so sánh.")
+               "**(1) = số tấm / cây theo tối ưu cắt trên kích thước chi tiết** (vật tư khác: SL theo BOM), chưa tính tồn kho "
+               "và contingency. **(4) = (1) − (2) + (3) + mua thêm.** Không dùng ghi chú, không ước lượng.")
     f1, f2, f3 = st.columns([2.2, 1.4, 1.2], vertical_alignment="bottom")
     grp = f1.selectbox("Điền nhanh tỷ lệ contingency cho nhóm", ["Tất cả"] + PR_GROUPS, key=f"pr_grp_{sig}")
     rate = f2.number_input("Tỷ lệ (%)", min_value=0.0, max_value=100.0, value=3.0, step=0.5, key=f"pr_rate_{sig}")
     fill_click = f3.button("⚡ Điền nhanh", width="stretch", key=f"pr_fill_{sig}")
     view = pd.DataFrame([{"Nhóm": r["Nhóm"], "Mã vật tư": r["Mã vật tư"], "Tên mặt hàng và quy cách": r["Tên mặt hàng và quy cách"],
-                          "Kích thước": e["Kích thước"], "ĐVT": e["ĐVT"], "Khổ cách cũ": e["Khổ cách cũ"],
-                          "Cách cũ": e["Cách cũ"], "Số lượng (1)": e["u0"] if e["opt"] else r["Số lượng theo BOM (1)"]}
+                          "Kích thước": e["Kích thước"], "ĐVT": e["ĐVT"],
+                          "Số lượng (1)": None if e["error"] else (e["u0"] if e["opt"] else r["Số lượng theo BOM (1)"])}
                          for r, e in zip(rows, eff0)])
     view = pd.concat([view, st.session_state[k_in].reset_index(drop=True)], axis=1)
     edited = st.data_editor(
         view, key=f"pr_ed_{sig}_{st.session_state[k_ver]}", hide_index=True, width="stretch", height=420,
         disabled=[c for c in view.columns if c not in PR_INPUT_COLS],
-        column_config={"Cách cũ": NUMCFG(format="localized", help="Định mức GHI CHÚ của KT hoặc quy KL – để so sánh"),
-                       "Số lượng (1)": NUMCFG(format="localized",
-                                              help="Số tấm/cây cần theo tối ưu cắt (thép) hoặc SL theo BOM (vật tư khác). "
-                                                   "Chưa trừ tồn kho, chưa cộng contingency"),
+        column_config={"Số lượng (1)": NUMCFG(format="localized",
+                                              help="Số tấm/cây theo tối ưu cắt (thép) hoặc SL theo BOM (vật tư khác). "
+                                                   "Chưa trừ tồn kho, chưa cộng contingency. Trống = thép thiếu dữ liệu"),
                        "Số lượng tồn (2)": NUMCFG(min_value=0, format="localized", help="Nhập tay"),
                        "Tỷ lệ contingency (%)": NUMCFG(min_value=0, max_value=100, step=0.5, format="%g",
-                                                       help="Nhập tay, VD 3 = 3%. Thép tối ưu: áp vào số chi tiết")})
+                                                       help="Nhập tay, VD 3 = 3%. Thép: áp vào số chi tiết")})
     cur_in = edited[PR_INPUT_COLS].reset_index(drop=True).astype("float64")
     if fill_click:
         mask = [grp == "Tất cả" or r["Nhóm"] == grp for r in rows]
@@ -3001,9 +3100,11 @@ def render_pr_tab(res, P, calc):
     extras = {i: st.session_state.get(ex_key(i), 0) for i in range(len(rows))}
     eff = pr_effective(rows, cut, choices, extras)
     calc_rows = pr_compute(rows, inputs, eff)
-    flagged = [r["Tên mặt hàng và quy cách"] for r, e in zip(rows, eff) if e["flag"]]
-    if flagged:
-        st.warning("⚠️ Có số ước lượng (thiếu kích thước chi tiết – giữ cách cũ): " + ", ".join(flagged))
+    blockers = pr_blockers(rows, eff)
+    if blockers:
+        st.error(f"❌ Chưa xuất được phiếu PR: {len(blockers)} dòng thép chưa tính được số tấm / cây (app không ước lượng). "
+                 "Bổ sung kích thước chi tiết ở tab **Live BOM Editor** hoặc file BOM, hoặc thêm khổ / chiều dài trong "
+                 "**✂️ Tối ưu cắt**.\n\n" + "\n".join(f"- {b}" for b in blockers))
     out = pd.DataFrame([{"Nhóm": r["Nhóm"], "Tên mặt hàng và quy cách": r["Tên mặt hàng và quy cách"],
                          "ĐVT": e["ĐVT"], "Kích thước": e["Kích thước"],
                          "Theo tối ưu (1)": c["(1)"], "Tồn (2)": i.get("Số lượng tồn (2)"),
@@ -3011,42 +3112,47 @@ def render_pr_tab(res, P, calc):
                          "Mua thêm": c["Mua thêm"], "SỐ LƯỢNG CẦN MUA (4)": c["Số lượng mua (4)"],
                          "KL theo SL mua (kg)": c["KL theo SL mua (kg)"], "Phương án": e["Phương án"],
                          "% phế": e["% phế"], "Đoạn dư dùng lại": e["Đoạn dư dùng lại"],
-                         "Khổ cách cũ": e["Khổ cách cũ"], "Cách cũ": e["Cách cũ"], "KL cách cũ (kg)": e["KL cách cũ"],
-                         "KL tối ưu (1) (kg)": e["KL tối ưu"],
-                         "Chênh KL (kg)": None if e["KL cách cũ"] is None else e["KL tối ưu"] - e["KL cách cũ"],
-                         "KL tịnh theo BOM (kg)": r["KL tịnh theo BOM (kg)"]}
+                         "KL tối ưu (1) (kg)": e["KL tối ưu"], "KL tịnh theo BOM (kg)": r["KL tịnh theo BOM (kg)"]}
                         for r, i, c, e in zip(rows, inputs, calc_rows, eff)])
     num = NUMCFG(format="localized")
-    txt_cols = ("Nhóm", "Tên mặt hàng và quy cách", "Kích thước", "Khổ cách cũ", "ĐVT", "Phương án", "Đoạn dư dùng lại")
+    txt_cols = ("Nhóm", "Tên mặt hàng và quy cách", "Kích thước", "ĐVT", "Phương án", "Đoạn dư dùng lại")
     st.markdown("##### 🛒 Số lượng cần mua")
     st.dataframe(out, hide_index=True, width="stretch", height=420,
                  column_config={c: num for c in out.columns if c not in txt_cols})
-    cmp_ = [e for e in eff if e["KL cách cũ"] is not None and e["KL tối ưu"] is not None]
-    m1, m2, m3, m4, m5 = st.columns(5)
+    opts = [(r, e["opt"]) for r, e in zip(rows, eff) if e["opt"]]
+    net = sum(sum(_ceil(it["q"]) * it["pp"]["kg"] for it in r["_parts"]) for r, _ in opts)
+    buy = sum(o["kg0"] for _, o in opts)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Số dòng vật tư", len(rows))
     m2.metric("KL theo SL mua (kg)", f"{sum(x['KL theo SL mua (kg)'] or 0 for x in calc_rows):,.1f}")
-    m3.metric("KL tịnh theo BOM (kg)", f"{sum(r['KL tịnh theo BOM (kg)'] or 0 for r in rows):,.1f}")
-    m4.metric("KL cách cũ (kg)", f"{sum(e['KL cách cũ'] for e in cmp_):,.1f}",
-              help="Tổng KL mua theo cách cũ, chỉ các dòng thép có so sánh được (chưa contingency)")
-    m5.metric("KL tối ưu (1) (kg)", f"{sum(e['KL tối ưu'] for e in cmp_):,.1f}",
-              delta=f"{sum(e['KL tối ưu'] - e['KL cách cũ'] for e in cmp_):+,.1f}", delta_color="off",
-              help="Cùng các dòng trên, theo sơ đồ cắt (chưa contingency). Dương = cách cũ mua thiếu")
-    try:
-        xb = build_pr_excel(base, inputs, res, P, calc, eff, cfg)
-        st.download_button("⬇️ Tải Phiếu PR đề xuất mua hàng (Excel)", xb,
-                           f"PR_de_xuat_{dt.date.today():%Y%m%d}.xlsx",
-                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary",
-                           key=f"pr_dl_{sig}")
-    except Exception as e:
-        st.error(f"❌ Lỗi tạo file PR: {e}")
+    m3.metric("KL thép theo tối ưu (1) (kg)", f"{buy:,.1f}", help="Các dòng thép tính được, chưa contingency")
+    m4.metric("Hao hụt cắt bình quân", f"{(1 - net / buy) * 100:,.2f}%" if buy else "–",
+              help="1 − KL tịnh chi tiết / KL tấm, cây theo tối ưu (1)")
+    with st.expander("📐 Chi tiết cắt – kích thước đầu vào của thuật toán"):
+        cdf = pd.DataFrame(base["cut"])
+        if len(cdf):
+            st.dataframe(cdf, hide_index=True, width="stretch",
+                         column_config={c: num for c in ("Dày", "Rộng", "Rộng B", "Dài", "SL chi tiết",
+                                                         "KL / chi tiết (kg)", "KL tịnh (kg)")})
+    if blockers:
+        st.info("Nút tải Phiếu PR sẽ hiện khi mọi dòng thép đã tính được.")
+    else:
+        try:
+            xb = build_pr_excel(base, inputs, res, P, calc, eff, cfg)
+            st.download_button("⬇️ Tải Phiếu PR đề xuất mua hàng (Excel)", xb,
+                               f"PR_de_xuat_{dt.date.today():%Y%m%d}.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary",
+                               key=f"pr_dl_{sig}")
+        except Exception as e:
+            st.error(f"❌ Lỗi tạo file PR: {e}")
 
     # ---- Tối ưu cắt: chọn phương án, mua thêm, xem sơ đồ (đổi ở đây → bảng trên tự cập nhật) ----
-    if any(cut):
+    if any(co and co["options"] for co in cut):
         st.markdown("##### ✂️ Tối ưu cắt – chọn phương án, mua thêm, xem sơ đồ")
         st.caption("Số cây/tấm tính theo sơ đồ cắt thật (mỗi chi tiết đã cộng contingency được xếp vào 1 cây/tấm cụ thể), "
-                   "nên không mua thiếu. ★ = đề xuất (ít vật liệu nhất, không phải ước lượng). Mua thêm chỉ cộng, không trừ.")
+                   "gộp mọi thành phẩm. ★ = đề xuất (ít vật liệu nhất). Mua thêm chỉ cộng, không trừ.")
     for i, (r, co) in enumerate(zip(rows, cut)):
-        if not co:
+        if not co or not co["options"]:
             continue
         by = {o["key"]: o for o in co["options"]}
         keys = list(by)
@@ -3059,30 +3165,46 @@ def render_pr_tab(res, P, calc):
             c.number_input("Mua thêm", min_value=0, step=1, key=ex_key(i))
             o = by[ch]
             dv_ = "tấm" if o["kind"] == "sheet" else "cây"
-            old = "" if o["old"] is None else f" · cách cũ **{o['old']:,.0f}**"
             a.markdown(f"**{r['Tên mặt hàng và quy cách']}** – cần **{o['u1']:,} {dv_}** ({o['breakdown']}), "
-                       f"phế {o['waste_pct']:g}%{old}" + (" · ⚠ có ước lượng" if o["est_codes"] else ""))
+                       f"phế {o['waste_pct']:g}%")
             tbl = pd.DataFrame([{"Phương án": x["label"] + (" ★" if x["key"] == co["rec"] else ""),
                                  "Số cây/tấm (1)": x["u0"], "Gồm contingency": x["u1"], "Chi tiết": x["breakdown"],
                                  "KL (1) (kg)": x["kg0"], "KL gồm contingency (kg)": x["kg1"], "% phế": x["waste_pct"],
-                                 "Đoạn dư dùng lại (m)": x["remnant_mm"] / 1000 if x["kind"] == "bar" else None,
-                                 "Cách cũ": x["old"], "Khổ cách cũ": x["old_size"], "KL cách cũ (kg)": x["old_kg"],
-                                 "Chênh KL (1) − cũ (kg)": None if x["old_kg"] is None else x["kg0"] - x["old_kg"],
-                                 "Ước lượng (thiếu kích thước / quá khổ)": ", ".join(dict.fromkeys(x["est_codes"]))}
+                                 "Đoạn dư dùng lại (m)": x["remnant_mm"] / 1000 if x["kind"] == "bar" else None}
                                 for x in co["options"]])
             st.dataframe(tbl, hide_index=True, width="stretch",
                          column_config={"KL (1) (kg)": NUMCFG(format="localized"), "KL gồm contingency (kg)": NUMCFG(format="localized"),
-                                        "KL cách cũ (kg)": NUMCFG(format="localized"),
-                                        "Chênh KL (1) − cũ (kg)": NUMCFG(format="localized"), "% phế": NUMCFG(format="%.2f"),
-                                        "Đoạn dư dùng lại (m)": NUMCFG(format="%.2f")})
-            with st.expander(f"Xem sơ đồ cắt – {o['label']} ({o['u1'] - o['est1']} {dv_} có sơ đồ)"):
+                                        "% phế": NUMCFG(format="%.2f"), "Đoạn dư dùng lại (m)": NUMCFG(format="%.2f")})
+            if co["invalid"]:
+                st.caption("Phương án bị loại: " + "; ".join(f"{x}: {y}" for x, y in co["invalid"]))
+            with st.expander(f"Xem sơ đồ cắt – {o['label']} ({o['u1']} {dv_})"):
                 plan = pd.DataFrame(pr_plan_rows(o, cfg))
                 if len(plan):
                     plan["Dùng"] = (plan["Dùng"] * 100).round(1)
                     st.dataframe(plan.rename(columns={"Dùng": "Dùng (%)"}), hide_index=True, width="stretch")
-                if o["est1"]:
-                    st.warning(f"⚠️ {o['est1']} {dv_} ước lượng theo cách cũ (chi tiết thiếu kích thước / quá khổ phôi): "
-                               + ", ".join(dict.fromkeys(o["est_codes"])))
+
+    # ---- Cấp phát theo lệnh SX ----
+    alloc = pr_allocation_rows(rows, eff, inputs, so_lines)
+    if alloc:
+        st.markdown("##### 📤 Cấp phát thép theo lệnh sản xuất (từ sơ đồ cắt gộp)")
+        st.caption("1 dòng SO = 1 lệnh sản xuất. Mỗi cây / tấm được chia cho các lệnh theo phần chiều dài / diện tích chi "
+                   "tiết của lệnh trên chính cây / tấm đó (phế, đoạn dư chia cùng tỷ lệ) → **tổng cấp phát = đúng KL mua "
+                   "theo sơ đồ**, không lệnh nào làm tròn riêng. Trên ExpertERP: **Chuyển nội bộ** cấp nguyên cây / tấm "
+                   "theo phiếu cắt gộp; **Xuất tiêu hao** từng lệnh theo cột *KL cấp phát*. *Chênh lệch* = phần cần chỉnh "
+                   "so với định mức ERP (MRP) ở Đề nghị xuất VTSX.")
+        adf = pd.DataFrame([{k: v for k, v in a.items() if not k.startswith("_")} for a in alloc])
+        adf["Chênh lệch (kg)"] = adf["KL cấp phát theo sơ đồ cắt (kg)"] - adf["KL theo định mức ERP (kg)"]
+        adf["% hao hụt cắt"] = [(1 - n_ / g) * 100 if g else None
+                                for n_, g in zip(adf["KL tịnh (kg)"], adf["KL cấp phát theo sơ đồ cắt (kg)"])]
+        st.dataframe(adf, hide_index=True, width="stretch", height=380,
+                     column_config={c: num for c in adf.columns
+                                    if c not in ("Vật tư", "Phương án", "Lệnh SX (dòng SO)", "Thành phẩm", "ĐVT quy đổi")})
+        chk = pd.DataFrame([{"Vật tư": a["Vật tư"], "KL mua theo sơ đồ (kg)": a["_kg_buy"],
+                             "Σ cấp phát (kg)": sum(x["KL cấp phát theo sơ đồ cắt (kg)"] for x in alloc if x["_rm"] == a["_rm"])}
+                            for a in {x["_rm"]: x for x in alloc}.values()])
+        chk["Lệch (kg)"] = chk["Σ cấp phát (kg)"] - chk["KL mua theo sơ đồ (kg)"]
+        with st.expander("Kiểm tra: Σ cấp phát = KL mua theo sơ đồ cắt"):
+            st.dataframe(chk, hide_index=True, width="stretch", column_config={c: num for c in chk.columns if c != "Vật tư"})
 
 
 def clean_slate():
@@ -3092,7 +3214,7 @@ def clean_slate():
 <div class="guide">
   <div class="guide-title">Chưa có dữ liệu – làm theo 3 bước để bắt đầu</div>
   <ol class="guide-steps">
-    <li><b>Nạp đơn hàng SO</b> – số lượng và giá FOB (USD) của từng mã thành phẩm.</li>
+    <li><b>Nạp đơn hàng SO</b> – số lượng và giá FOB (USD) của từng mã thành phẩm; nhiều đơn hàng thì chọn nhiều file.</li>
     <li><b>Nạp BOM kỹ thuật</b> – mỗi thành phẩm 1 file, chọn nhiều file cùng lúc được.
         Mã FG trong BOM phải trùng mã ERP hoặc mã KH trong SO.</li>
     <li>Bấm <b>Tính toán MRP</b>.</li>
@@ -3181,18 +3303,18 @@ border-top:1px solid rgba(128,128,128,.22);padding-top:.5rem}
     # ---------------- Nạp dữ liệu đầu vào (màn hình chính) ----------------
     gen = st.session_state.get("_gen", 0)  # đổi số này để reset các ô file uploader
     up1, up2, up3 = st.columns(3)
-    so_file = upload_card(up1, 1, "Đơn hàng bán (SO)", True,
-                          "Số lượng & giá FOB (USD) theo mã thành phẩm.", f"up_so_{gen}")
+    so_files = upload_card(up1, 1, "Đơn hàng bán (SO)", True,
+                           "Số lượng & giá FOB (USD) – chọn nhiều file SO cùng lúc được.", f"up_so_{gen}", multiple=True)
     bom_files = upload_card(up2, 2, "BOM kỹ thuật", True,
                             "Mỗi thành phẩm 1 file – chọn nhiều file cùng lúc.", f"up_bom_{gen}", multiple=True)
     po_file = upload_card(up3, 3, "Đơn mua hàng (PO)", False,
                           "Đơn giá mua thực tế, số PO & nhà cung cấp.", f"up_po_{gen}")
     with st.container(key="act_bar"):
         a1, a2, a3 = st.columns([4.4, 2.3, 1.5], vertical_alignment="center")
-        a1.markdown('<div class="chips">' + file_chip("SO", so_file) + file_chip("BOM", bom_files or [])
+        a1.markdown('<div class="chips">' + file_chip("SO", so_files or []) + file_chip("BOM", bom_files or [])
                     + file_chip("PO", po_file) + "</div>", unsafe_allow_html=True)
         btn_calc = a2.button("🚀 TÍNH TOÁN MRP", type="primary", width="stretch",
-                             disabled=not (so_file and bom_files),
+                             disabled=not (so_files and bom_files),
                              help="Đọc file, rã BOM, tính MRP và giá thành. Cần tối thiểu SO + BOM.")
         btn_reset = a3.button("🗑️ Xóa", width="stretch",
                               help="Xóa kết quả và các tệp đã nạp, quay về trạng thái chờ.")
@@ -3240,14 +3362,15 @@ border-top:1px solid rgba(128,128,128,.22);padding-top:.5rem}
 
     # ---------------- Nút TÍNH TOÁN MRP: đọc file 1 lần, lưu vào session_state ----------------
     cur_sig = None
-    if so_file and bom_files:
+    if so_files and bom_files:
         bom_sig = file_hash("|".join(f"{f.name}:{file_hash(f.getvalue())}" for f in bom_files).encode())
-        cur_sig = (file_hash(so_file.getvalue()), bom_sig,
+        so_sig = file_hash("|".join(f"{f.name}:{file_hash(f.getvalue())}" for f in so_files).encode())
+        cur_sig = (so_sig, bom_sig,
                    file_hash(po_file.getvalue()) if po_file else None)
     if btn_calc and cur_sig:
         st.session_state.pop("calc", None)
         try:
-            so_df, so_warn, so_info = parse_so(so_file.getvalue(), so_file.name)
+            so_df, so_warn, so_info = parse_so_multi([(f.getvalue(), f.name) for f in so_files])
             bom_df, stage_cols, sheet_ctx, bom_infos, bom_warn = parse_bom_multi(
                 [(f.getvalue(), f.name) for f in bom_files])
         except Exception as e:
@@ -3265,7 +3388,7 @@ border-top:1px solid rgba(128,128,128,.22);padding-top:.5rem}
             "bom_df": bom_df, "stage_cols": stage_cols, "sheet_ctx": sheet_ctx,
             "bom_infos": bom_infos, "bom_warn": bom_warn, "po_df": po_df, "po_info": po_info,
             "po_msg": po_msg, "bom_key": cur_sig[1],
-            "bom_names": [f.name for f in bom_files], "so_name": so_file.name,
+            "bom_names": [f.name for f in bom_files], "so_name": ", ".join(f.name for f in so_files),
         }
 
     calc = st.session_state.get("calc")
@@ -3402,7 +3525,7 @@ border-top:1px solid rgba(128,128,128,.22);padding-top:.5rem}
             st.markdown("##### 🔗 Đối chiếu SO ↔ BOM")
             fs = res["fg_source"]
             map_df = pd.DataFrame([{
-                "Dòng SO": j + 1, "Mã FG": l["Mã Sản Phẩm ERP"], "Tên TP": l["Tên Thành Phẩm"], "Số lượng": l["Số Lượng"],
+                "Dòng SO": j + 1, **({"File SO": l["File SO"]} if l.get("File SO") else {}), "Mã FG": l["Mã Sản Phẩm ERP"], "Tên TP": l["Tên Thành Phẩm"], "Số lượng": l["Số Lượng"],
                 "File BOM": ", ".join(dict.fromkeys(source_file(s) or s for s in fs.get(l["Mã Sản Phẩm ERP"], []))),
                 "Công đoạn": " → ".join(res["fg_stages"].get(l["Mã Sản Phẩm ERP"], [])),
                 "Trạng thái": "✅ Khớp" if fs.get(l["Mã Sản Phẩm ERP"]) else "⚠️ Không thấy dòng FG trong BOM",
