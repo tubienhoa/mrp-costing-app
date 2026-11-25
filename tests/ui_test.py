@@ -47,10 +47,8 @@ for mode in ("0", "2", "3", "S", "M", "D"):
         assert any("BAS-01" in i.value and "định mức khác nhau" in i.value for i in at.info), [i.value for i in at.info]
         assert not at.error, "MODE M không được có lỗi"
         print(" warnings:", [w[:90] for w in ws])
-    if mode in ("2", "S"):  # Tab Đề xuất mua hàng (PR): điền nhanh → TÍNH TOÁN PR → có nút tải Excel PR
-        assert not [b for b in at.button if "TẢI" in b.label.upper()], "chưa tính PR đã có nút tải"
+    if mode in ("2", "S"):  # Tab Đề xuất mua hàng (PR): điền nhanh → bảng tự cập nhật → có nút tải Excel PR
         [b for b in at.button if "Điền nhanh" in b.label][0].click().run()
-        [b for b in at.button if "TÍNH TOÁN PR" in b.label][0].click().run()
         assert not at.exception, [e.value for e in at.exception]
         dls = [d for d in at.get("download_button") if "PR" in str(d.proto.label)]
         assert dls, "không có nút tải Phiếu PR"
@@ -63,12 +61,12 @@ for mode in ("0", "2", "3", "S", "M", "D"):
             sb.select(other).run()
             [n for n in at.number_input if n.label == "Mua thêm"][0].set_value(2).run()
             assert not at.exception, [e.value for e in at.exception]
-            pr = [d.value for d in at.dataframe if "Theo tối ưu (1)" in d.value.columns][0]
+            pr = [d.value for d in at.dataframe if "SỐ LƯỢNG CẦN MUA (4)" in d.value.columns][0]
             r0 = pr.iloc[0]
-            assert r0["Mua thêm"] == 2 and r0["Số lượng mua (4)"] == r0["Theo tối ưu (1)"] + r0["Contingency (3)"] + 2, r0
+            assert r0["Mua thêm"] == 2 and r0["SỐ LƯỢNG CẦN MUA (4)"] == r0["Theo tối ưu (1)"] + r0["Contingency (3)"] + 2, r0
             assert r0["Phương án"].startswith("Khổ " + other.replace("x", "×")), (r0["Phương án"], other)
             assert [d for d in at.get("download_button") if "PR" in str(d.proto.label)]
-            print(" PR tối ưu cắt: OK – đổi phương án", other, "+ mua thêm 2 →", r0["Số lượng mua (4)"], r0["ĐVT"])
+            print(" PR tối ưu cắt: OK – đổi phương án", other, "+ mua thêm 2 →", r0["SỐ LƯỢNG CẦN MUA (4)"], r0["ĐVT"])
     if mode == "D":
         assert any("Lỗi trùng BOM" in e.value and "FG-CHAIR-02" in e.value for e in at.error), "MODE D phải báo trùng FG"
     for e in at.exception:

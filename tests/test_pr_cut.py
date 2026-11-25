@@ -152,7 +152,7 @@ def test_random_rows_every_piece_cut():
 def excel_check(res, label):
     base = app.build_pr_base(res)
     rows = base["rows"]
-    inputs = [{"Số lượng tồn (2)": (k % 3), "Tỷ lệ contingency (%)": 3, "SL PR Kỹ thuật (5)": (None if k % 2 else 5)}
+    inputs = [{"Số lượng tồn (2)": (k % 3), "Tỷ lệ contingency (%)": 3}
               for k in range(len(rows))]
     cut = app.pr_cut_all(rows, inputs, CFG)
     eff = app.pr_effective(rows, cut, extras={0: 1})
@@ -179,7 +179,7 @@ def excel_check(res, label):
           and isinstance(ws.cell(c.row, 1).value, int)]
     n = 0
     for r_, c in zip(rr, calc_rows):
-        for col, key in (("P", "Số lượng mua (4)"), ("S", "Số lượng đặt mua"), ("U", "KL theo SL mua (kg)"),
+        for col, key in (("P", "Số lượng mua (4)"), ("R", "KL theo SL mua (kg)"),
                          ("N", "Contingency (3)")):
             x = val.get(f"{col}{r_}")
             y = c[key]
@@ -187,7 +187,7 @@ def excel_check(res, label):
             assert (x is None and y is None) or abs(x - y) < 1e-6, (label, r_, col, x, y)
             n += 1
     os.remove(path)
-    print(f"  [{label}] Excel PR tính lại khớp pr_compute: {len(rr)} dòng × 4 cột, 0 lỗi công thức")
+    print(f"  [{label}] Excel PR tính lại khớp pr_compute: {len(rr)} dòng × 3 cột, 0 lỗi công thức")
     return base, cut, eff
 
 
