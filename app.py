@@ -1503,6 +1503,7 @@ def build_pr_base(res):
             if ms:
                 common_sheet[tuple(sorted((to_float(ms.group(1)), to_float(ms.group(2))), reverse=True))] += 1
     rows, cut_rows = [], []
+    sug_sheet, sug_bar = Counter(), Counter()  # khổ tấm / chiều dài cây xuất hiện trong GHI CHÚ BOM → gợi ý danh mục cắt
     for i, m in enumerate(mrp):
         c = m["Mã NVL"]
         n = nodes[c]
@@ -1532,6 +1533,8 @@ def build_pr_base(res):
                     parsed.append((code, q, pp, "m2", None, to_float(mm.group(2)) / (to_float(mm.group(1)) or 1)))
                 else:
                     parsed.append((code, q, pp, "kg", None, None))
+            for k_, n_ in sizes.items():
+                (sug_sheet if len(k_) == 2 else sug_bar)[k_] += n_
             kho = sizes.most_common(1)[0][0] if sizes else None
             if kho is None and grp == PR_GROUPS[0] and common_sheet:
                 kho = common_sheet.most_common(1)[0][0]
@@ -1607,7 +1610,9 @@ def build_pr_base(res):
                       "_vals": [sum(l["Số Lượng"] * res["R"][i][j] for i in ids) for j, l in enumerate(so_lines)],
                       "Ghi chú": (f"Quy đổi: {r['Số lượng theo BOM (1)']} {r['ĐVT'].lower()} (xem sheet Dinh_muc_cat)"
                                   if r["ĐVT"] in ("Tấm", "Cây") else "")})
-    return {"rows": rows, "cut": cut_rows, "model": model}
+    suggest = {"sheets": [(int(min(k)), int(max(k))) for k, _ in sug_sheet.most_common()],   # (rộng, dài)
+               "bars": [int(k[0]) for k, _ in sug_bar.most_common()]}
+    return {"rows": rows, "cut": cut_rows, "model": model, "suggest": suggest}
 
 
 # ---- Tối ưu cắt cho phiếu PR (thuật toán ở cutting.py) – quy số chi tiết ra số CÂY / TẤM thật phải mua ----
@@ -2863,18 +2868,42 @@ def render_tree(res, fg, max_rows=3000):
     return pd.DataFrame(out)
 
 
-def pr_cut_settings():
+def pr_cut_defaults(suggest):
+    """Danh mục khởi đầu: khổ tấm / chiều dài cây có trong GHI CHÚ BOM → bật; mặc định còn lại → tắt (thêm được, bật lại được).
+    BOM không ghi khổ nào thì dùng mặc định như cũ."""
+    sg = suggest or {}
+    sheets = [(a, b, True) for a, b in sg.get("sheets", [])]
+    bars = [(L, True) for L in sg.get("bars", [])]
+    if sheets:
+        sheets += [(a, b, False) for a, b, _ in PR_CUT_DEFAULT["sheets"]
+                   if tuple(sorted((a, b))) not in {tuple(sorted((x, y))) for x, y, _ in sheets}]
+    else:
+        sheets = list(PR_CUT_DEFAULT["sheets"])
+    if bars:
+        bars += [(L, False) for L, _ in PR_CUT_DEFAULT["bars"] if L not in {x for x, _ in bars}]
+    else:
+        bars = list(PR_CUT_DEFAULT["bars"])
+    return bars, sheets
+
+
+def pr_cut_settings(suggest=None, sig=""):
     """Danh mục chiều dài cây / khổ tấm và thông số cắt (sửa được trên giao diện). Trả cfg cho pr_cut_options."""
+    d_bars, d_sheets = pr_cut_defaults(suggest)
     with st.expander("✂️ Tối ưu cắt – danh mục cây, khổ tấm và thông số cắt", expanded=False):
+        st.markdown("| Bảng | Dùng cho | Nhập gì |\n|---|---|---|\n"
+                    "| **Bên trái – Cây** | Thép **cây**: tròn đặc, ống, hộp, lap | Chiều dài 1 cây nhà cung cấp bán (mm), VD 6000 |\n"
+                    "| **Bên phải – Tấm** | Thép **tấm** | Khổ 1 tấm: Rộng × Dài (mm), VD 1250 × 3000 |")
+        if suggest and (suggest.get("sheets") or suggest.get("bars")):
+            st.caption("Đã bật sẵn các khổ / chiều dài ghi trong GHI CHÚ của BOM; khổ mặc định còn lại để tắt, tick \"Dùng\" nếu muốn xét thêm.")
         st.caption("Bật/tắt hoặc thêm dòng. Phương án cây: từng chiều dài được bật + trộn các chiều dài được bật. "
                    "Phương án tấm: từng khổ được bật.")
         c1, c2 = st.columns(2)
-        bars = c1.data_editor(pd.DataFrame([{"Chiều dài cây (mm)": float(L), "Dùng": on} for L, on in PR_CUT_DEFAULT["bars"]]),
-                              key="pr_cut_bars", hide_index=True, num_rows="dynamic", width="stretch",
+        bars = c1.data_editor(pd.DataFrame([{"Chiều dài cây (mm)": float(L), "Dùng": on} for L, on in d_bars]),
+                              key=f"pr_cut_bars_{sig}", hide_index=True, num_rows="dynamic", width="stretch",
                               column_config={"Chiều dài cây (mm)": NUMCFG(min_value=100, step=100, format="%d")})
         sheets = c2.data_editor(pd.DataFrame([{"Rộng (mm)": float(a), "Dài (mm)": float(b), "Dùng": on}
-                                              for a, b, on in PR_CUT_DEFAULT["sheets"]]),
-                                key="pr_cut_sheets", hide_index=True, num_rows="dynamic", width="stretch",
+                                              for a, b, on in d_sheets]),
+                                key=f"pr_cut_sheets_{sig}", hide_index=True, num_rows="dynamic", width="stretch",
                                 column_config={"Rộng (mm)": NUMCFG(min_value=100, step=50, format="%d"),
                                                "Dài (mm)": NUMCFG(min_value=100, step=50, format="%d")})
         k1, k2, k3, k4 = st.columns(4)
@@ -2944,7 +2973,7 @@ def render_pr_tab(res, P, calc):
     if k_in not in st.session_state:
         st.session_state[k_in] = pd.DataFrame({c: [None] * len(rows) for c in PR_INPUT_COLS}, dtype="float64")
         st.session_state[k_ver] = 0
-    cfg = pr_cut_settings()
+    cfg = pr_cut_settings(base.get("suggest"), sig)
     ch_key = lambda i: f"pr_ch_{sig}_{i}"  # noqa: E731
     ex_key = lambda i: f"pr_ex_{sig}_{i}"  # noqa: E731
     choices = {i: st.session_state.get(ch_key(i)) for i in range(len(rows))}

@@ -110,6 +110,15 @@ def test_old_method_keeps_its_own_size_and_kg():
         assert o["old_size"] == o["size"] and o["old"] == app._ceil(188.5 / o["unit"])
 
 
+def test_defaults_follow_bom_notes():
+    sheets = app.pr_cut_defaults({"sheets": [(1250, 3000), (1500, 3000), (1500, 3250)], "bars": [5800]})[1]
+    assert sheets[:3] == [(1250, 3000, True), (1500, 3000, True), (1500, 3250, True)]
+    assert [x for x in sheets if x[2]] == sheets[:3] and (1250, 2500, False) in sheets   # mặc định còn lại tắt
+    assert app.pr_cut_defaults({"sheets": [(1500, 3000)], "bars": []})[1].count((1500, 3000, True)) == 1   # không trùng
+    assert app.pr_cut_defaults({"sheets": [], "bars": [5800]})[0][0] == (5800, True)
+    assert app.pr_cut_defaults(None) == (app.PR_CUT_DEFAULT["bars"], app.PR_CUT_DEFAULT["sheets"])   # BOM không ghi khổ → mặc định cũ
+
+
 def test_sheet_row_and_too_big():
     r = row(app.PR_GROUPS[0], "Thép tấm 4.0", [("BIG", 3, pp(t=4, w=240, l=2734, kg=20.5)),
                                                ("S", 50, pp(t=4, w=300, l=400, kg=3.77))])
